@@ -24,16 +24,18 @@
 
 // define constants
 #define MAX_UPDATE_INTRVL 2500
+#define MIN_UPDATE_CADENCE 10
 
 #define NO_OP_TOUT 10
 #define NO_OP_SYSTEM_OFF_TOUT 60
 #define PEDALING_DET_SMPLS_THRSHLD  3
+#define BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD 0
 
 //#define APPLY_EXP_DECAY_ON_DPS_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_FORCE_FCTR 0.9
-#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.85
+//#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.85
 
-const float DPS_MIN = 1000.f * (360.f / MAX_UPDATE_INTRVL);
+const float DPS_MIN = MIN_UPDATE_CADENCE * 6; //1000.f * (360.f / MAX_UPDATE_INTRVL);
 const float DPS_CRANK_CIRC_VEL_MULTI =  PI * CRANK_RADIUS / 180;
 
 uint16_t totalCrankRevs = 0;
@@ -44,33 +46,34 @@ TaskHandle_t loopTaskHandle = NULL;
 SemaphoreHandle_t loopTaskCmdDoneSemaphore = NULL;
 
 enum LOOP_TASK_CMD {
-  CALIBRATE_OFFSETS = 1
+  CALIBRATE_OFFSETS = 1,
+  UPDATE_POWER = 2
 };
 float zForceCalibDiffL = 0, zForceCalibDiffR = 0;
 
 #ifdef COLLECT_REV_STATS
 struct {
   float avgAngVel = 0;
-  float avgForceL = 0;
-  float avgForceR = 0;
-  float avgForcePosL = 0;
-  float avgForcePosR = 0;
+  float avgPowerPosL = 0;
+  float avgPowerPosR = 0;
+  float avgPowerNegL = 0;
+  float avgPowerNegR = 0;
   float avgRawValueL = 0;
   float avgRawValueR = 0;
   float circVel = 0;
-  int16_t numOfSmpls = 0;
 } lastRevStats;
 #endif
 
 struct {
   long  time = 0;
-  float cad = 0;
   float powerL = 0;
   float powerR = 0;
   float teL = 0;
   float teR = 0;
   float psL = 0;
   float psR = 0;
+  float avgAngVel = 0;
+  int16_t numOfSmpls = 0;
 } lastRev;
 
 #ifdef ENABLE_SD_LOGS
@@ -119,26 +122,18 @@ inline void disableSD() {
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
 }
-inline void writeRideLogEntryToSD(const long& timeNow, const int16_t& power = 0, const float& cad = 0, const float& teL = 0, const float& psL = 0, const float& teR = 0, const float& psR = 0, const double& avgForceL = 0, const double& avgForceR = 0, const float& avgMPS = 0, const int16_t numOfSmpls = 0)  {
+inline void writeRideLogEntryToSD()  {
   if (sdCardDetected) {
     static char msg[1024];
     static bool initLog = true;
     if (initLog) {
-      #ifdef COLLECT_REV_STATS
-      sprintf(msg, "Time; Cad; Power; Pedal; avgForceL; avgForceR; avgMPS; TEL; PSL; TER; PSR; Smpls");
-      #else
-      sprintf(msg, "Time; Cad; Power; Pedal; TEL; PSL; TER; PSR");
-      #endif
+      sprintf(msg, "Time; Cad; Power; Pedal; TEL; PSL; TER; PSR; Smpls");
       SD.mkdir(RIDE_PATH_PFX);
       contRideLogFile = SD.open(RIDE_PATH_PFX + "ride" + String(START_IDX) +".csv", FILE_WRITE);
       contRideLogFile.println(msg);
       initLog = false;
     }
-    #ifdef COLLECT_REV_STATS
-    sprintf(msg, "%ld; %.3f; %d; %d; %.3f; %.3f; %.3f; %.3f; %.3f; %.3f; %.3f; %d", timeNow, cad, power, cad > 0, teL, psL, teR, psR, avgForceL, avgForceR, avgMPS, numOfSmpls);
-    #else
-    sprintf(msg, "%ld; %.3f; %d; %d; %.3f; %.3f; %.3f; %.3f", timeNow, cad, power, cad > 0, teL, psL, teR, psR);
-    #endif
+    sprintf(msg, "%ld; %.3f; %.1f; %d; %.3f; %.3f; %.3f; %.3f; %d", lastRev.time, lastRev.avgAngVel / 6, lastRev.powerL + lastRev.powerR, lastRev.avgAngVel > DPS_MIN, lastRev.teL, lastRev.psL, lastRev.teR, lastRev.psR, lastRev.numOfSmpls);
     #ifdef DEBUG
     Serial.println(msg);
     #endif
@@ -207,11 +202,7 @@ inline void disableSD() {
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
 }
-#ifdef COLLECT_REV_STATS
-inline void writeRideLogEntryToSD(const long& timeNow, const int16_t& power = 0, const float& cad = 0, const float& teL = 0, const float& psL = 0, const float& teR = 0, const float& psR = 0,  const double& avgForceL = 0, const double& avgForceR = 0, const float& avgMPS = 0, const int16_t numOfSmpls = 0) {}
-#else
-inline void writeRideLogEntryToSD(const long& timeNow, const int16_t& power = 0, const float& cad = 0, const float& teL = 0, const float& psL = 0, const float& teR = 0, const float& psR = 0) {}
-#endif
+inline void writeRideLogEntryToSD() {}
 inline void writeRevStatsToSD() {}
 #endif
 
@@ -262,10 +253,24 @@ inline void doInfrequentUpdateOperations() {
   }
 }
 
-inline bool checkPedalingAndUpdateInterval(long& timeNow, float& angVel, bool& pedaling) {
+inline bool checkUpdateInterval(long& timeNow, float& angVel) {
   static long lastUpdate = millis();
+
+  static float revAngl = 0;
+
+  revAngl += angVel / LOAD_CELL_EXP_SPS_RATE;
+
+  if (revAngl < 360 && (timeNow - lastUpdate) < MAX_UPDATE_INTRVL) {
+    return false;
+  }
+
+  lastUpdate = timeNow;
+  revAngl = 0;
+  return true;
+}
+
+inline bool checkPedaling(float& angVel) {
   static uint32_t instPedlCtr = 0;
-  //static bool prevRevPedaling = false;
 
   bool instPedaling = (angVel > DPS_MIN);
 
@@ -273,24 +278,8 @@ inline bool checkPedalingAndUpdateInterval(long& timeNow, float& angVel, bool& p
     instPedlCtr++;
   } else {
     instPedlCtr = 0;
-    //prevRevPedaling = false;
   }
-  pedaling = instPedlCtr > PEDALING_DET_SMPLS_THRSHLD;
-
-  if ((timeNow - lastUpdate) < (pedaling ? 1000.f * (360.f / angVel) : MAX_UPDATE_INTRVL)) {
-    return false;
-  }
-  /*
-  if (!prevRevPedaling && pedaling
-      && maxForceL > PEDALING_SYNC_FORCE_THRSHLD
-      && forceL < maxForceL) {
-    resetInterval();
-    return false;
-  }
-  prevRevPedaling = pedaling;
-  */
-  lastUpdate = timeNow;
-  return true;
+  return instPedlCtr > PEDALING_DET_SMPLS_THRSHLD;
 }
 
 inline void applyExpDecay(float & currValue, float & avgValue, const float& avgWeight) {
@@ -298,20 +287,21 @@ inline void applyExpDecay(float & currValue, float & avgValue, const float& avgW
 }
 
 void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int32_t& valueR) {
-  static float maxForceL = FLT_MIN;
-  static float maxForceR = FLT_MIN;
-  static float minForceR = FLT_MAX;
-  static float minForceL = FLT_MAX;
+  static float maxPowerL = FLT_MIN;
+  static float maxPowerR = FLT_MIN;
+  static float minPowerR = FLT_MAX;
+  static float minPowerL = FLT_MAX;
 
-  static int16_t numOfPosForceValsL = 0;
-  static int16_t numOfPosForceValsR = 0;
-  static int16_t numOfSmpls = 0;
+  static int16_t numOfPosPowerValsL = 0;
+  static int16_t numOfPosPowerValsR = 0;
+  static int16_t numOfNegPowerValsL = 0;
+  static int16_t numOfNegPowerValsR = 0;
 
   static double sumAngVel = 0.f;
-  static double sumForceL = 0.f;
-  static double sumForceR = 0.f;
-  static double sumForcePosL = 0.f;
-  static double sumForcePosR = 0.f;
+  static double sumPowerPosL = 0.f;
+  static double sumPowerPosR = 0.f;
+  static double sumPowerNegL = 0.f;
+  static double sumPowerNegR = 0.f;
 
   #ifdef COLLECT_REV_STATS
   static double sumValueL = 0.f;
@@ -321,8 +311,13 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   static float angVel = 0;
   static float forceL = 0;
   static float forceR = 0;
+  static float revAngl = 0;
 
-  long smplTime = millis();
+  static bool revComplete  = false;
+  static bool initPedaling = true;
+  static float prevForceL  = 0;
+
+  static long lastUpdate = millis();
 
   float instDPS = gaGetAngularVelocity();
   instDPS = (instDPS < 90 || instDPS > 1440) ? 0: abs(instDPS); // filter ang. vel. to allow only pos. cad. >15rpm & <240rpm
@@ -331,6 +326,9 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   #else
   angVel = instDPS;
   #endif
+
+  long smplTime = millis();
+  
   #ifdef APPLY_EXP_DECAY_ON_FORCE_FCTR
   applyExpDecay(instForceL, forceL, APPLY_EXP_DECAY_ON_FORCE_FCTR);
   applyExpDecay(instForceR, forceR, APPLY_EXP_DECAY_ON_FORCE_FCTR);
@@ -339,102 +337,127 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   forceR = instForceR;
   #endif
 
+  float instCircVel = angVel * DPS_CRANK_CIRC_VEL_MULTI;
+
   sumAngVel += angVel;
-  sumForceL += forceL;
-  sumForceR += forceR;
   #ifdef COLLECT_REV_STATS
   sumValueL += valueL;
   sumValueR += valueR;
   #endif
 
-  if (forceL > 0) {
-    sumForcePosL += forceL;
-    numOfPosForceValsL++;
-  }
-  if (forceR > 0) {
-    sumForcePosR += forceR;
-    numOfPosForceValsR++;
-  }
-  if (forceL < minForceL) minForceL = forceL;
-  if (forceL > maxForceL) maxForceL = forceL;
-  if (forceR < minForceR) minForceR = forceR;
-  if (forceR > maxForceR) maxForceR = forceR;
+  float instPwrL = forceL * instCircVel;
+  float instPwrR = forceR * instCircVel;
 
-  numOfSmpls++;
+  if (instPwrL > 0) {
+    sumPowerPosL += instPwrL;
+    numOfPosPowerValsL++;
+  }
+  if (instPwrR > 0) {
+    sumPowerPosR += instPwrR;
+    numOfPosPowerValsR++;
+  }
+  if (instPwrL < 0) {
+    sumPowerNegL += instPwrL;
+    numOfNegPowerValsL++;
+  }
+  if (instPwrR < 0) {
+    sumPowerNegR += instPwrR;
+    numOfNegPowerValsR++;
+  }
+  if (instPwrL < minPowerL) minPowerL = instPwrL;
+  if (instPwrL > maxPowerL) maxPowerL = instPwrL;
+  if (instPwrR < minPowerR) minPowerR = instPwrR;
+  if (instPwrR > maxPowerR) maxPowerR = instPwrR;
 
-  bool pedaling = false;
-  if(!checkPedalingAndUpdateInterval(smplTime, angVel, pedaling))
+
+  if (checkPedaling(angVel)) {
+    revAngl += angVel / LOAD_CELL_EXP_SPS_RATE;
+    if (initPedaling && (prevForceL > forceL) && (forceL < BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD)) {
+      // synchronize revolution if left crank arm is in down stroke and buttom dead-spot is reached
+      revComplete = true;
+      initPedaling = false;
+    } else {
+      revComplete = (revAngl >= 360);
+    }
+  } else {
+    revAngl = 0;
+    revComplete = false;
+    initPedaling = true;
+  }
+  prevForceL = forceL;
+
+
+  if (revComplete) {
+    totalCrankRevs += 1;
+
+    uint16_t numOfSmpls = numOfPosPowerValsL + numOfNegPowerValsL;
+
+    float avgAngVel = sumAngVel / numOfSmpls;
+    float avgPowerL = (sumPowerPosL + sumPowerNegL) / numOfSmpls;
+    float avgPowerR = (sumPowerPosR + sumPowerNegR) / numOfSmpls;
+
+    #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
+    applyExpDecay(avgPowerL, lastRev.powerL, APPLY_EXP_DECAY_ON_POWER_FCTR);
+    applyExpDecay(avgPowerR, lastRev.powerR, APPLY_EXP_DECAY_ON_POWER_FCTR);
+    #else
+    lastRev.powerL = avgPowerL;
+    lastRev.powerR = avgPowerR;
+    #endif
+
+    float avgPowerPosL = (numOfPosPowerValsL > 1) ? sumPowerPosL / numOfPosPowerValsL : sumPowerPosL;
+    float avgPowerPosR = (numOfPosPowerValsR > 1) ? sumPowerPosR / numOfPosPowerValsR : sumPowerPosR;
+    float avgPowerNegL = (numOfNegPowerValsL > 1) ? sumPowerNegL / numOfNegPowerValsL : sumPowerNegL;
+    float avgPowerNegR = (numOfNegPowerValsR > 1) ? sumPowerNegR / numOfNegPowerValsR : sumPowerNegR;
+
+    lastRev.teL = (avgPowerPosL + avgPowerNegL) / avgPowerPosL;
+    lastRev.teR = (avgPowerPosR + avgPowerNegR) / avgPowerPosR;
+    lastRev.psL = avgPowerL / maxPowerL;
+    lastRev.psR = avgPowerR / maxPowerR;
+
+    lastRev.avgAngVel  = avgAngVel;
+    lastRev.numOfSmpls   = numOfSmpls;
+
+    #ifdef COLLECT_REV_STATS
+    lastRevStats.circVel   = avgAngVel * DPS_CRANK_CIRC_VEL_MULTI;
+    lastRevStats.avgAngVel = avgAngVel;
+    lastRevStats.avgPowerPosL = avgPowerPosL;
+    lastRevStats.avgPowerPosR = avgPowerPosR;
+    lastRevStats.avgPowerNegL = avgPowerNegL;
+    lastRevStats.avgPowerNegR = avgPowerNegR;
+    lastRevStats.avgRawValueL = sumValueL / numOfSmpls;
+    lastRevStats.avgRawValueR = sumValueR / numOfSmpls;
+    #endif
+    
+  } else if((smplTime - lastUpdate) >= MAX_UPDATE_INTRVL) {
+    memset(&lastRev, 0, sizeof(lastRev));
+    #ifdef COLLECT_REV_STATS
+    memset(&lastRevStats, 0, sizeof(lastRevStats));
+    #endif
+  } else {
     return;
+  }
 
   lastRev.time = smplTime;
 
-  if (pedaling) {
-    totalCrankRevs += 1;
-    
-    float avgAngVel = sumAngVel / numOfSmpls;
-    float avgForceL = sumForceL / numOfSmpls;
-    float avgForceR = sumForceR / numOfSmpls;
-
-    float avgForcePosL = (numOfPosForceValsL > 1) ? sumForcePosL / numOfPosForceValsL : sumForcePosL;
-    float avgForcePosR = (numOfPosForceValsR > 1) ? sumForcePosR / numOfPosForceValsR : sumForcePosR;
-
-    lastRev.teL = avgForceL / avgForcePosL;
-    lastRev.teR = avgForceR / avgForcePosR;
-    lastRev.psL = avgForceL / maxForceL;
-    lastRev.psR = avgForceR / maxForceR;
-
-    // calculate circular velocity from avgAngVel
-    float circVel = avgAngVel * DPS_CRANK_CIRC_VEL_MULTI;
-
-    // calculate instantaneous power
-    float instPowerL = circVel * avgForceL;
-    float instPowerR = circVel * avgForceR;
-    #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
-    applyExpDecay(instPowerL, lastRev.powerL, APPLY_EXP_DECAY_ON_POWER_FCTR);
-    applyExpDecay(instPowerR, lastRev.powerR, APPLY_EXP_DECAY_ON_POWER_FCTR);
-    #else
-    lastRev.powerL = instPowerL;
-    lastRev.powerR = instPowerR;
-    #endif
-
-    lastRev.cad  = avgAngVel / 6;
-
-    #ifdef COLLECT_REV_STATS
-    lastRevStats.circVel   = circVel;
-    lastRevStats.avgAngVel = avgAngVel;
-    lastRevStats.avgForceL = avgForceL;
-    lastRevStats.avgForceR = avgForceR;
-    lastRevStats.avgForcePosL = avgForcePosL;
-    lastRevStats.avgForcePosR = avgForcePosR;
-    lastRevStats.numOfSmpls   = numOfSmpls;
-    #endif
-  } else {
-    memset(&lastRev, 0, sizeof(lastRev));
-  }
-
-  #ifdef COLLECT_REV_STATS
-  if (!pedaling) {
-    memset(&lastRevStats, 0, sizeof(lastRevStats));
-  }
-  lastRevStats.avgRawValueL = sumValueL / numOfSmpls;
-  lastRevStats.avgRawValueR = sumValueR / numOfSmpls;
-  #endif
-
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  xTaskNotifyFromISR(loopTaskHandle, 0, eNoAction, &xHigherPriorityTaskWoken);
+  xTaskNotifyFromISR(loopTaskHandle, LOOP_TASK_CMD::UPDATE_POWER, eSetValueWithoutOverwrite, &xHigherPriorityTaskWoken);
   
-  maxForceL = FLT_MIN;
-  maxForceR = FLT_MIN;
-  minForceR = FLT_MAX;
-  minForceL = FLT_MAX;
-  numOfPosForceValsL = 0;
-  numOfPosForceValsR = 0;
-  numOfSmpls = 0;
-  sumAngVel = 0.f;
-  sumForceL = 0.f;
-  sumForceR = 0.f;
-  sumForcePosL = 0.f;
-  sumForcePosR = 0.f;
+  lastUpdate = smplTime;
+
+  maxPowerL = FLT_MIN;
+  maxPowerR = FLT_MIN;
+  minPowerR = FLT_MAX;
+  minPowerL = FLT_MAX;
+  numOfPosPowerValsL = 0;
+  numOfPosPowerValsR = 0;
+  numOfNegPowerValsL = 0;
+  numOfNegPowerValsR = 0;
+  revAngl = 0;
+  sumAngVel = 0;
+  sumPowerPosL = 0;
+  sumPowerPosR = 0;
+  sumPowerNegL = 0;
+  sumPowerNegR = 0;
   #ifdef COLLECT_REV_STATS
   sumValueL = 0.f;
   sumValueR = 0.f;
@@ -517,7 +540,7 @@ void setup() {
 }
 
 void loop() {
-  static int32_t idleCtr = -1;
+  static uint32_t idleCtr = 0;
   TickType_t loopWakeTime = xTaskGetTickCount();
 
   #ifdef DO_RAW_MEASURE_1S_LOOP
@@ -526,21 +549,23 @@ void loop() {
   #endif
 
   if (Bluefruit.connected()) {
-    if (idleCtr >= NO_OP_TOUT || idleCtr == -1) {
+  static bool init = true;
+    if (idleCtr >= NO_OP_TOUT || init) {
       gaDisableCycledSleep();
       lcSoftPowerUp();
     }
-    if (idleCtr > 0 || idleCtr == -1) {      
+    if (idleCtr > 0 || init) {      
       lcStartContValueUpdate(isrCbLoadUpdate);
       idleCtr = 0;
+      init = false;
     }
 
-    uint32_t ntfValue;
-    xTaskNotifyWait(0xffffffff, 0, &ntfValue, ms2tick(5000));
-    idleConnected = (lastRev.cad == 0);
+    uint32_t notifiedCommand = 0;
+    xTaskNotifyWait(0xffffffff, 0, &notifiedCommand, ms2tick(5000));
+    idleConnected = (lastRev.avgAngVel == 0);
     
-    if (ntfValue) {
-      switch (ntfValue)
+    if (notifiedCommand) {
+      switch (notifiedCommand)
       {
       case LOOP_TASK_CMD::CALIBRATE_OFFSETS:
         if(!idleConnected) {
@@ -556,22 +581,27 @@ void loop() {
         gaGyroZeroCalibration();
         lcStartContValueUpdate(isrCbLoadUpdate);
         break;
+      case LOOP_TASK_CMD::UPDATE_POWER:
+        blePublishPower(lastRev.powerL, lastRev.powerR, totalCrankRevs, lastRev.time);
+        blePublishTePs(lastRev.teL, lastRev.psL);
+      break;
       default:
         break;
       }
       xSemaphoreGive(loopTaskCmdDoneSemaphore);
     }
-
-    float powerTotal = lastRev.powerL + lastRev.powerR;
-    blePublishPower(powerTotal, totalCrankRevs, lastRev.time);
-    blePublishTePs(lastRev.teL, lastRev.psL);
  
     doInfrequentUpdateOperations();
 
     #ifdef COLLECT_REV_STATS
     #ifdef ENABLE_BLE_LOG
-    float avgForceLS = lastRevStats.avgForceL > lastRevStats.avgForceR ? lastRevStats.avgForceL : lastRevStats.avgForceR;
-    blePublishLog("P%.0f F%.1f C%.0f", powerTotal,avgForceLS, lastRev.cad);
+    float scaleFctL, scaleFctR;
+    lcGetScaleFactor(scaleFctL, scaleFctR);
+    float avgForceL = lastRevStats.avgRawValueL * scaleFctL;
+    float avgForceR = lastRevStats.avgRawValueR * scaleFctR;
+    float avgForceLS = avgForceL > avgForceR ? avgForceL : avgForceR;
+
+    blePublishLog("P%.0f F%.1f C%.0f", lastRev.powerL + lastRev.powerR, avgForceLS, lastRev.avgAngVel / 6);
     #ifdef MANUAL_CALIB
     float avgRawValueLS = lastRevStats.avgRawValueL > lastRevStats.avgRawValueR ? lastRevStats.avgRawValueL : lastRevStats.avgRawValueR;
     static float rlMax = 0;
@@ -590,11 +620,7 @@ void loop() {
     #endif
 
     #ifdef ENABLE_SD_LOGS
-    #ifdef COLLECT_REV_STATS
-    writeRideLogEntryToSD(lastRev.time, powerTotal, lastRev.cad, lastRev.teL, lastRev.psL, lastRev.teR, lastRev.psR, lastRevStats.avgForceL, lastRevStats.avgForceR, lastRevStats.circVel, lastRevStats.numOfSmpls);
-    #else
-    writeRideLogEntryToSD(lastRev.time, powerTotal, lastRev.cad, lastRev.teL, lastRev.psL, lastRev.teR, lastRev.psR);
-    #endif
+    writeRideLogEntryToSD();
     #endif
   } else {
     blinkLED(1, 100);

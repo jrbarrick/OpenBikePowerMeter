@@ -3,7 +3,7 @@
 
 
 
-#define LOAD_CELL_EXP_SPS_RATE 296.0f
+#define LOAD_CELL_EXP_SPS_RATE 296.58565f
 
 // calibrate this according to an external reference
 #define LOAD_FORCE_SCALE_FCT_L 1684.528

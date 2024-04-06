@@ -7,7 +7,7 @@ typedef int16_t (bleOffsetCompCb_t)(bool& resultValid);
 
 void bleSetup();
 
-void blePublishPower(int16_t instantPwr, uint16_t crankRevs, long millisLast);
+void blePublishPower(int16_t instantPwrL,int16_t instantPwrR, uint16_t crankRevs, long millisLast);
 
 void blePublishBatt(uint8_t battPercent);
 void bleSetOffsetCompensationCb(bleOffsetCompCb_t* bleOffsetCompCb);

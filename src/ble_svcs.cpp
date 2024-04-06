@@ -252,7 +252,7 @@ void setupCFM() {
 /*
  * Publish the instantaneous power measurement.
  */
-void blePublishPower(int16_t instantPwr, uint16_t crankRevs, long millisLast) {
+void blePublishPower(int16_t instantPwrL,int16_t instantPwrR, uint16_t crankRevs, long millisLast) {
   // Power measure characteristic
   /**
    * Fields
@@ -294,7 +294,7 @@ void blePublishPower(int16_t instantPwr, uint16_t crankRevs, long millisLast) {
 #ifdef SIMULATE
   instantPwr = 33;
 #endif
-  uint16ToLso(instantPwr, pwr);
+  uint16ToLso(instantPwrL + instantPwrR, pwr);
   // Split the 16-bit ints into 8 bits, LSO is first in array.
   uint8_t cranks[2];
 #ifdef SIMULATE
