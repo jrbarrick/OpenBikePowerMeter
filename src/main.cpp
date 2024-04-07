@@ -23,17 +23,27 @@
 #define SD_CS_PIN SS
 
 // define constants
-#define MAX_UPDATE_INTRVL 2500
-#define MIN_UPDATE_CADENCE 10
-
 #define NO_OP_TOUT 10
 #define NO_OP_SYSTEM_OFF_TOUT 60
-#define PEDALING_DET_SMPLS_THRSHLD  3
-#define BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD 0
+
+#define MAX_UPDATE_INTRVL 2500
+#define MIN_UPDATE_CADENCE 5
 
 //#define APPLY_EXP_DECAY_ON_DPS_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_FORCE_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.85
+
+#define PEDALING_DET_SMPLS_THRSHLD  20
+
+#define ENABLE_EXTREME_ANGLE_DETECT
+
+#define ENABLE_DEAD_SPOT_DETECT
+#define CONT_FORCE_DET_SMPL_COUNT 10
+#define BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD 3
+#define TOP_DEAD_SPOT_MIN_FORCE_THRSHLD -1
+
+
+#define USE_ANGL_INCR_REV_DETECT_WITH_FORCE_TRSHLD_BDS_INIT_SYNC
 
 const float DPS_MIN = MIN_UPDATE_CADENCE * 6; //1000.f * (360.f / MAX_UPDATE_INTRVL);
 const float DPS_CRANK_CIRC_VEL_MULTI =  PI * CRANK_RADIUS / 180;
@@ -253,33 +263,22 @@ inline void doInfrequentUpdateOperations() {
   }
 }
 
-inline bool checkUpdateInterval(long& timeNow, float& angVel) {
-  static long lastUpdate = millis();
-
-  static float revAngl = 0;
-
-  revAngl += angVel / LOAD_CELL_EXP_SPS_RATE;
-
-  if (revAngl < 360 && (timeNow - lastUpdate) < MAX_UPDATE_INTRVL) {
-    return false;
-  }
-
-  lastUpdate = timeNow;
-  revAngl = 0;
-  return true;
-}
-
 inline bool checkPedaling(float& angVel) {
   static uint32_t instPedlCtr = 0;
+  static bool pedaling = false;
 
-  bool instPedaling = (angVel > DPS_MIN);
-
-  if (instPedaling) {
-    instPedlCtr++;
+  if (angVel > DPS_MIN) {
+    if(instPedlCtr < PEDALING_DET_SMPLS_THRSHLD) {
+      instPedlCtr++;
+    } else {
+      pedaling = true;
+    }
+  } else if(instPedlCtr > 0) {
+    instPedlCtr--;
   } else {
-    instPedlCtr = 0;
+    pedaling = false;
   }
-  return instPedlCtr > PEDALING_DET_SMPLS_THRSHLD;
+  return pedaling;
 }
 
 inline void applyExpDecay(float & currValue, float & avgValue, const float& avgWeight) {
@@ -287,15 +286,29 @@ inline void applyExpDecay(float & currValue, float & avgValue, const float& avgW
 }
 
 void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int32_t& valueR) {
+  static uint32_t numOfPosPowerValsL = 0;
+  static uint32_t numOfPosPowerValsR = 0;
+  static uint32_t numOfNegPowerValsL = 0;
+  static uint32_t numOfNegPowerValsR = 0;
+  static uint32_t numOfSmpls = 0;
+
+  static uint32_t maxPowerLIdx = 0;
+  static uint32_t maxPowerRIdx = 0;
+  static uint32_t minPowerRIdx = 0;
+  static uint32_t minPowerLIdx = 0;
+
   static float maxPowerL = FLT_MIN;
   static float maxPowerR = FLT_MIN;
   static float minPowerR = FLT_MAX;
   static float minPowerL = FLT_MAX;
-
-  static int16_t numOfPosPowerValsL = 0;
-  static int16_t numOfPosPowerValsR = 0;
-  static int16_t numOfNegPowerValsL = 0;
-  static int16_t numOfNegPowerValsR = 0;
+  
+  static bool bdsPreCondReached = false;
+  static bool tdsPreCondReached = false;
+  static bool bdsReached = false;
+  static bool tdsReached = false;
+  
+  static uint32_t tdsLIdx = 0;
+  static uint32_t bdsLIdx = 0;
 
   static double sumAngVel = 0.f;
   static double sumPowerPosL = 0.f;
@@ -311,11 +324,12 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   static float angVel = 0;
   static float forceL = 0;
   static float forceR = 0;
-  static float revAngl = 0;
 
-  static bool revComplete  = false;
-  static bool initPedaling = true;
-  static float prevForceL  = 0;
+  #ifdef USE_ANGL_INCR_REV_DETECT_WITH_FORCE_TRSHLD_BDS_INIT_SYNC
+  static float revAngl = 0;
+  static bool  syncPedaling = true;
+  static float prevForceL = 0;
+  #endif
 
   static long lastUpdate = millis();
 
@@ -369,29 +383,81 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   if (instPwrR < minPowerR) minPowerR = instPwrR;
   if (instPwrR > maxPowerR) maxPowerR = instPwrR;
 
+  #ifdef ENABLE_EXTREME_ANGLE_DETECT
+  if (instPwrL < minPowerL) minPowerLIdx = numOfSmpls;
+  if (instPwrL > maxPowerL) maxPowerLIdx = numOfSmpls;
+  if (instPwrR < minPowerR) minPowerRIdx = numOfSmpls;
+  if (instPwrR > maxPowerR) maxPowerRIdx = numOfSmpls;
+  #endif
+  
+  numOfSmpls++;
 
+  #ifdef ENABLE_DEAD_SPOT_DETECT
+  //bool bdsReached  = (prevForceL > BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD) && (prevForceL > forceL) && (forceL < BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD);
+  if (!bdsPreCondReached) {
+    static int32_t contDecrForceLCtr = 0;
+    if (forceL < prevForceL) {
+      contDecrForceLCtr++;
+    } else {
+      contDecrForceLCtr = 0;
+    }
+    if ((contDecrForceLCtr > CONT_FORCE_DET_SMPL_COUNT) && (forceL < BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD)) {
+      contDecrForceLCtr = 0;
+      bdsPreCondReached = true;
+    }
+  }
+  if (!tdsPreCondReached) {
+    static int32_t contIncrForceLCtr = 0;
+    if (forceL > prevForceL) {
+      contIncrForceLCtr++;
+    } else {
+      contIncrForceLCtr = 0;
+    }
+    if ((contIncrForceLCtr > CONT_FORCE_DET_SMPL_COUNT) && (forceL > TOP_DEAD_SPOT_MIN_FORCE_THRSHLD)) {
+      contIncrForceLCtr = 0;
+      tdsPreCondReached = true;
+    }
+  }
+  if (!tdsReached && tdsPreCondReached && (prevForceL < 0) && (prevForceL < forceL) && (forceL > 0)) {
+    tdsReached = true;
+    tdsLIdx = numOfSmpls;
+  }
+  if (!bdsReached && bdsPreCondReached && (prevForceL > 0) && (prevForceL > forceL) && (forceL < 0)) {
+    bdsReached = true;
+    bdsLIdx = numOfSmpls;
+  }
+  prevForceL = forceL;
+  #endif
+
+  bool updatePower = false;
+  #ifdef USE_TIME_BASED_INST_ANGL_REV_DETECT
+  if (checkPedaling(angVel) && (smplTime - lastUpdate) < (360.f / angVel) * 1000.f)) {
+    totalCrankRevs += 1;
+    updatePower = true;
+  }
+  #elif defined(ENABLE_DEAD_SPOT_DETECT) && defined(USE_ANGL_INCR_REV_DETECT_WITH_FORCE_TRSHLD_BDS_INIT_SYNC)
   if (checkPedaling(angVel)) {
     revAngl += angVel / LOAD_CELL_EXP_SPS_RATE;
-    if (initPedaling && (prevForceL > forceL) && (forceL < BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD)) {
+    if (syncPedaling) {
       // synchronize revolution if left crank arm is in down stroke and buttom dead-spot is reached
-      revComplete = true;
-      initPedaling = false;
-    } else {
-      revComplete = (revAngl >= 360);
+      if (bdsReached) {
+        syncPedaling = false;
+        updatePower = true;
+      }
+    } else if (revAngl >= 360) {
+      revAngl -= 360;
+      updatePower = true;
+      totalCrankRevs += 1;
     }
   } else {
     revAngl = 0;
-    revComplete = false;
-    initPedaling = true;
+    syncPedaling = true;
   }
-  prevForceL = forceL;
+  #endif
 
 
-  if (revComplete) {
-    totalCrankRevs += 1;
 
-    uint16_t numOfSmpls = numOfPosPowerValsL + numOfNegPowerValsL;
-
+  if (updatePower) {
     float avgAngVel = sumAngVel / numOfSmpls;
     float avgPowerL = (sumPowerPosL + sumPowerNegL) / numOfSmpls;
     float avgPowerR = (sumPowerPosR + sumPowerNegR) / numOfSmpls;
@@ -415,7 +481,14 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     lastRev.psR = avgPowerR / maxPowerR;
 
     lastRev.avgAngVel  = avgAngVel;
-    lastRev.numOfSmpls   = numOfSmpls;
+    lastRev.numOfSmpls = numOfSmpls;
+
+    #ifdef ENABLE_DEAD_SPOT_DETECT
+    if (bdsReached) {
+    }
+    if (tdsReached) {
+    }
+    #endif
 
     #ifdef COLLECT_REV_STATS
     lastRevStats.circVel   = avgAngVel * DPS_CRANK_CIRC_VEL_MULTI;
@@ -452,12 +525,16 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   numOfPosPowerValsR = 0;
   numOfNegPowerValsL = 0;
   numOfNegPowerValsR = 0;
-  revAngl = 0;
+  numOfSmpls = 0;
   sumAngVel = 0;
   sumPowerPosL = 0;
   sumPowerPosR = 0;
   sumPowerNegL = 0;
   sumPowerNegR = 0;
+  bdsPreCondReached = false;
+  tdsPreCondReached = false;
+  bdsReached = false;
+  tdsReached = false;
   #ifdef COLLECT_REV_STATS
   sumValueL = 0.f;
   sumValueR = 0.f;
