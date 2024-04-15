@@ -31,7 +31,7 @@
 
 //#define APPLY_EXP_DECAY_ON_DPS_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_FORCE_FCTR 0.9
-//#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.85
+//#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.9
 
 #define PEDALING_DET_SMPLS_THRSHLD  20
 
@@ -75,16 +75,11 @@ struct {
 #endif
 
 struct {
-  long  time = 0;
-  float powerL = 0;
-  float powerR = 0;
-  float teL = 0;
-  float teR = 0;
-  float psL = 0;
-  float psR = 0;
   float avgAngVel = 0;
   int16_t numOfSmpls = 0;
-} lastRev;
+} lastRevMI;
+
+revUpdt_t lastRev;
 
 #ifdef ENABLE_SD_LOGS
 #define IDX_FILE "STARTCTR"
@@ -143,7 +138,7 @@ inline void writeRideLogEntryToSD()  {
       contRideLogFile.println(msg);
       initLog = false;
     }
-    sprintf(msg, "%ld; %.3f; %.1f; %d; %.3f; %.3f; %.3f; %.3f; %d", lastRev.time, lastRev.avgAngVel / 6, lastRev.powerL + lastRev.powerR, lastRev.avgAngVel > DPS_MIN, lastRev.teL, lastRev.psL, lastRev.teR, lastRev.psR, lastRev.numOfSmpls);
+    sprintf(msg, "%ld; %.3f; %.1f; %d; %.3f; %.3f; %.3f; %.3f; %d", lastRev.time, lastRevMI.avgAngVel / 6, lastRev.powerL + lastRev.powerR, lastRevMI.avgAngVel > DPS_MIN, lastRev.teL, lastRev.psL, lastRev.teR, lastRev.psR, lastRevMI.numOfSmpls);
     #ifdef DEBUG
     Serial.println(msg);
     #endif
@@ -258,7 +253,7 @@ inline void doInfrequentUpdateOperations() {
   // 1000 ms / sec * 60 sec / min * 5 = 5 minutes
   long timeDiff = timeNow - lastInfrequentUpdate;
   if (timeDiff == 0 || timeDiff > 1000 * 60 * 5) {
-    blePublishBatt(getBatterySOC());
+    blePublishBatSOC(getBatterySOC());
     lastInfrequentUpdate = timeNow;
   }
 }
@@ -390,8 +385,6 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   if (instPwrR > maxPowerR) maxPowerRIdx = numOfSmpls;
   #endif
   
-  numOfSmpls++;
-
   #ifdef ENABLE_DEAD_SPOT_DETECT
   //bool bdsReached  = (prevForceL > BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD) && (prevForceL > forceL) && (forceL < BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD);
   if (!bdsPreCondReached) {
@@ -429,6 +422,12 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   prevForceL = forceL;
   #endif
 
+
+
+  numOfSmpls++;
+
+
+
   bool updatePower = false;
   #ifdef USE_TIME_BASED_INST_ANGL_REV_DETECT
   if (checkPedaling(angVel) && (smplTime - lastUpdate) < (360.f / angVel) * 1000.f)) {
@@ -443,6 +442,7 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
       if (bdsReached) {
         syncPedaling = false;
         updatePower = true;
+        revAngl = 0;
       }
     } else if (revAngl >= 360) {
       revAngl -= 360;
@@ -454,8 +454,6 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     syncPedaling = true;
   }
   #endif
-
-
 
   if (updatePower) {
     float avgAngVel = sumAngVel / numOfSmpls;
@@ -480,15 +478,21 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     lastRev.psL = avgPowerL / maxPowerL;
     lastRev.psR = avgPowerR / maxPowerR;
 
-    lastRev.avgAngVel  = avgAngVel;
-    lastRev.numOfSmpls = numOfSmpls;
-
     #ifdef ENABLE_DEAD_SPOT_DETECT
     if (bdsReached) {
+      //TODO:...
     }
     if (tdsReached) {
+      //TODO:...
     }
     #endif
+
+    #ifdef ENABLE_EXTREME_ANGLE_DETECT
+    //TODO:...
+    #endif
+
+    lastRevMI.avgAngVel  = avgAngVel;
+    lastRevMI.numOfSmpls = numOfSmpls;
 
     #ifdef COLLECT_REV_STATS
     lastRevStats.circVel   = avgAngVel * DPS_CRANK_CIRC_VEL_MULTI;
@@ -503,6 +507,7 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     
   } else if((smplTime - lastUpdate) >= MAX_UPDATE_INTRVL) {
     memset(&lastRev, 0, sizeof(lastRev));
+    memset(&lastRevMI, 0, sizeof(lastRevMI));
     #ifdef COLLECT_REV_STATS
     memset(&lastRevStats, 0, sizeof(lastRevStats));
     #endif
@@ -510,7 +515,8 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     return;
   }
 
-  lastRev.time = smplTime;
+  lastRev.time = smplTime;  
+  lastRev.crankRev = totalCrankRevs;
 
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   xTaskNotifyFromISR(loopTaskHandle, LOOP_TASK_CMD::UPDATE_POWER, eSetValueWithoutOverwrite, &xHigherPriorityTaskWoken);
@@ -639,7 +645,7 @@ void loop() {
 
     uint32_t notifiedCommand = 0;
     xTaskNotifyWait(0xffffffff, 0, &notifiedCommand, ms2tick(5000));
-    idleConnected = (lastRev.avgAngVel == 0);
+    idleConnected = (lastRevMI.avgAngVel == 0);
     
     if (notifiedCommand) {
       switch (notifiedCommand)
@@ -659,15 +665,14 @@ void loop() {
         lcStartContValueUpdate(isrCbLoadUpdate);
         break;
       case LOOP_TASK_CMD::UPDATE_POWER:
-        blePublishPower(lastRev.powerL, lastRev.powerR, totalCrankRevs, lastRev.time);
-        blePublishTePs(lastRev.teL, lastRev.psL);
+        blePublishRevUpdate(lastRev);
       break;
       default:
         break;
       }
       xSemaphoreGive(loopTaskCmdDoneSemaphore);
     }
- 
+
     doInfrequentUpdateOperations();
 
     #ifdef COLLECT_REV_STATS
@@ -678,7 +683,8 @@ void loop() {
     float avgForceR = lastRevStats.avgRawValueR * scaleFctR;
     float avgForceLS = avgForceL > avgForceR ? avgForceL : avgForceR;
 
-    blePublishLog("P%.0f F%.1f C%.0f", lastRev.powerL + lastRev.powerR, avgForceLS, lastRev.avgAngVel / 6);
+    //blePublishLog("P%.0f F%.1f C%.0f", lastRev.powerL + lastRev.powerR, avgForceLS, lastRevMI.avgAngVel / 6);
+    blePublishLog("PL%.1f PR%.1f C%.0f", lastRev.powerL, lastRev.powerR, lastRevMI.avgAngVel / 6);
     #ifdef MANUAL_CALIB
     float avgRawValueLS = lastRevStats.avgRawValueL > lastRevStats.avgRawValueR ? lastRevStats.avgRawValueL : lastRevStats.avgRawValueR;
     static float rlMax = 0;
