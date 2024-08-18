@@ -31,6 +31,9 @@ long LOAD_OFFSET_CHA_R = 0;
 float LOAD_SCALE_FCT_CHA_L = 1;
 float LOAD_SCALE_FCT_CHA_R = 1;
 
+bool lcAvailableL = false;
+bool lcAvailableR = false;
+
 lcUpdateIsrCb_t* loadUpdateCb = nullptr;
 
 uint32_t READ_TIMEOUT_CTR_INIT_VALUE = (1 / (float)LOAD_CELL_EXP_SPS_RATE * 1700000);
@@ -54,11 +57,7 @@ uint32_t READ_TIMEOUT_CTR_INIT_VALUE = (1 / (float)LOAD_CELL_EXP_SPS_RATE * 1700
 
 bool waitForReady() {
 	uint32_t tOutCtr = READ_TIMEOUT_CTR_INIT_VALUE;
-	#ifdef ENABLE_RIGHT_LOAD_CELL
-	while (digitalRead(PIN_LOAD_D0_L) || digitalRead(PIN_LOAD_D0_R))
-	#else
-	while (digitalRead(PIN_LOAD_D0_L))
-	#endif
+	while ((lcAvailableL && digitalRead(PIN_LOAD_D0_L)) || (lcAvailableR && digitalRead(PIN_LOAD_D0_R)))
 	{
 		if (tOutCtr-- == 0) {
 			return false;
@@ -199,10 +198,11 @@ inline void scaleValueChA(int32_t& valueL, int32_t&valueR, float& sValueL, float
 	sValueL = (float)valueL / LOAD_SCALE_FCT_CHA_L;
 	sValueR = (float)valueR / LOAD_SCALE_FCT_CHA_R;
 
-	#ifndef ENABLE_RIGHT_LOAD_CELL
+	if(!lcAvailableL) {
+		sValueL = sValueR;
+	} else if(!lcAvailableR) {
 		sValueR = sValueL;
-		valueL  = valueR;
-	#endif
+	}
 }
 
 bool lcGetValue(float& sValueL, float& sValueR) {
@@ -215,12 +215,8 @@ bool lcGetValue(float& sValueL, float& sValueR) {
 	return true;
 }
 
-void dataReady() {
-	#ifdef ENABLE_RIGHT_LOAD_CELL
-	if (!digitalRead(PIN_LOAD_D0_L) && !digitalRead(PIN_LOAD_D0_R))
-	#else
-	if (!digitalRead(PIN_LOAD_D0_L))
-	#endif
+void onDataReady() {
+	if (!(lcAvailableL && digitalRead(PIN_LOAD_D0_L)) && !(lcAvailableR && digitalRead(PIN_LOAD_D0_R)))
 	{
 		if (loadUpdateCb) {
 			float sValueL, sValueR;
@@ -232,13 +228,33 @@ void dataReady() {
 	}
 }
 
+void lcGetAvailableLCs(bool& availableL, bool& availableR) {
+	availableL = lcAvailableL;
+	availableR = lcAvailableR;
+}
+
 void lcSetup() {
 	digitalWrite(PIN_LOAD_SCK, HIGH);
 	pinMode(PIN_LOAD_SCK, OUTPUT_H0H1);
-	pinMode(PIN_LOAD_D0_L, INPUT);
-#ifdef ENABLE_RIGHT_LOAD_CELL
-	pinMode(PIN_LOAD_D0_R, INPUT);
-#endif
+	pinMode(PIN_LOAD_D0_L, INPUT_PULLUP);
+	pinMode(PIN_LOAD_D0_R, INPUT_PULLUP);
+
+	lcSoftPowerUp();
+
+	uint32_t tOutCtr = READ_TIMEOUT_CTR_INIT_VALUE;
+	int32_t valueL, valueR;
+	readInternal(valueL, valueR, 1);
+	while (tOutCtr--) {
+		if (!digitalRead(PIN_LOAD_D0_L)) {
+			lcAvailableL = true;
+		}
+		if (!digitalRead(PIN_LOAD_D0_R)) {
+			lcAvailableR = true;
+		}
+		if (lcAvailableL && lcAvailableR) {
+			return;
+		}
+	}
 }
 
 void lcStartContValueUpdate(lcUpdateIsrCb_t* ldUpdateCb) {
@@ -248,22 +264,22 @@ void lcStartContValueUpdate(lcUpdateIsrCb_t* ldUpdateCb) {
     loadUpdateCb = ldUpdateCb;
 	int32_t valueL, valueR;
 	read(valueL, valueR);
-	#ifdef ENABLE_RIGHT_LOAD_CELL
-    attachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L), dataReady, FALLING);
-    attachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_R), dataReady, FALLING);
-	#else
-    attachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L), dataReady, FALLING);
-	#endif
+	if(lcAvailableL) {
+    	attachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L), onDataReady, FALLING);
+	}
+	if(lcAvailableR) {
+    	attachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_R), onDataReady, FALLING);
+	}
 }
 
 void lcStopContValueUpdate() {
 	loadUpdateCb = nullptr;
-	#ifdef ENABLE_RIGHT_LOAD_CELL
-    detachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L));
-    detachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_R));
-	#else
-    detachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L));
-	#endif
+	if(lcAvailableL) {
+    	detachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_L));
+	}
+	if(lcAvailableR) {
+    	detachInterrupt(digitalPinToInterrupt(PIN_LOAD_D0_R));
+	}
 }
 
 void lcSoftPowerUp() {

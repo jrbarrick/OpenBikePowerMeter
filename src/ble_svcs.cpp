@@ -1,66 +1,57 @@
 #include <Arduino.h>
 #include <bluefruit.h>
 #include "ble_svcs.h"
-#include <set>
 
-//#define ENABLE_EXT_SVCS
+#define ENABLE_EXT_SVCS
 
 #ifdef ENABLE_EXT_SVCS
 #include "ble_ext_svcs.h"
 #endif
 
 #define DEBUG
+
 #ifndef DEV_NAME
-#define DEV_NAME "QuPwrMeter"
+#define DEV_NAME "OBPM"
 #endif
 
+#ifndef DEV_REV
+#define DEV_REV  "01"
+#endif
+
+#ifndef DEV_OP_MODE
+#define DEV_OP_MODE  "-" 
+//#define DEV_OP_MODE  "L-"
+//#define DEV_OP_MODE  "R-"
+#endif
+
+char devOpModeStr[4] = DEV_OP_MODE;
 
 #define BLE_ADV_TIMEOUT_S 0
-#define BLE_FAST_ADV_TIMEOUT_S 60
+#define BLE_FAST_ADV_TIMEOUT_S 300
 
 #define BLE_FAST_ADV_INTVL_MS  1 * 1000
 #define BLE_SLOW_ADV_INTVL_MS 10 * 1000
 
 #define MAX_CONNECTIONS 3
-//#define NOTIFY_PEDAL_POWER_BALANCE
 
-BLEService        pwrService  = BLEService(UUID16_SVC_CYCLING_POWER);
-BLECharacteristic pwrMeasChar = BLECharacteristic(UUID16_CHR_CYCLING_POWER_MEASUREMENT);
-BLECharacteristic pwrFeatChar = BLECharacteristic(UUID16_CHR_CYCLING_POWER_FEATURE);
-BLECharacteristic pwrCtlChar  = BLECharacteristic(UUID16_CHR_CYCLING_POWER_CONTROL_POINT);
-BLECharacteristic pwrLocChar  = BLECharacteristic(UUID16_CHR_SENSOR_LOCATION);
+BLEDis     bleDIS; // default "Device Information Service"
+BLEBas     bleBS;  // default "Battery Service"
+BLEService pwrSvc;
+BLECharacteristic pwrMeasChr, pwrFeatChr, pwrCtlChr, sensLocChr;
+
+uint32_t pwrFeatures = FTR_CRANK_REV | FTR_OFS_CALIB /*| FTR_P_PWR_BAL*/;
 
 bleOffsetCompCb_t* offsetCompCallback = nullptr;
-
-BLEDis bleDIS;   // default "Device Information Service"
-BLEBas bleBS;    // default "Battery Service"
-
 
 /*
  * Only here for development.
  */
-BLEService        cfmService = BLEService(0xcafe);
-BLECharacteristic cfgChar    = BLECharacteristic("35916a45-9726-4ef4-b09d-f3284968f03c");
-BLECharacteristic logChar    = BLECharacteristic("5abc3692-fca4-4a69-955d-cd0442de273f");
+BLEService     cfmService = BLEService(0xcafe);
+BLECharacteristic cfgChar = BLECharacteristic("35916a45-9726-4ef4-b09d-f3284968f03c");
+BLECharacteristic logChar = BLECharacteristic("5abc3692-fca4-4a69-955d-cd0442de273f");
+
 
 std::set<uint16_t> availConnHndls;
-uint8_t mainAdvData[BLE_GAP_ADV_SET_DATA_SIZE_MAX];
-uint8_t mainAdvSize;
-
-void bleStartAdvertising() {
-  //Bluefruit.Advertising.stop();
-  Bluefruit.Advertising.setData(mainAdvData, mainAdvSize);
-
-  Bluefruit.Advertising.addService(pwrService);
-#ifdef ENABLE_BLE_LOG
-  //Bluefruit.Advertising.addService(cfmService);
-#endif
-#ifdef ENABLE_EXT_SVCS
-  bleExtAddAdvSvc(&Bluefruit.Advertising);
-#endif
-
-  Bluefruit.Advertising.start(0);
-}
 
 void bleConnectCb(uint16_t connHndl)
 {
@@ -80,7 +71,7 @@ void bleConnectCb(uint16_t connHndl)
 
   if (availConnHndls.size() < MAX_CONNECTIONS) {
     // keep advertising active
-    bleStartAdvertising();
+    Bluefruit.Advertising.start();
   }
 }
 
@@ -89,6 +80,8 @@ void bleDisconnectCb(uint16_t connHndl, uint8_t reason)
   (void) reason;
 
   availConnHndls.erase(connHndl);
+  
+  //blePwrSvc.removeConnection(connHndl);
 
 #ifdef ENABLE_EXT_SVCS
   bleExtRemoveConnection(connHndl);
@@ -96,22 +89,6 @@ void bleDisconnectCb(uint16_t connHndl, uint8_t reason)
 
   Serial.println();
   Serial.println("Central disconnected.");
-  if (availConnHndls.size() < MAX_CONNECTIONS) {
-    // restart advertising if any connected dev. disconnects
-    bleStartAdvertising();
-  }
-}
-
-void blePrepareAdvertising(void) {
-  Bluefruit.Advertising.addName();
-  Bluefruit.Advertising.addTxPower();
-  Bluefruit.Advertising.restartOnDisconnect(false);
-  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-  Bluefruit.Advertising.setIntervalMS(BLE_FAST_ADV_INTVL_MS, BLE_SLOW_ADV_INTVL_MS);
-  Bluefruit.Advertising.setFastTimeout(BLE_FAST_ADV_TIMEOUT_S);
-
-  memcpy(mainAdvData, Bluefruit.Advertising.getData(), BLE_GAP_ADV_SET_DATA_SIZE_MAX);
-  mainAdvSize = Bluefruit.Advertising.count();
 }
 
 void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16_t len) {
@@ -120,7 +97,7 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
   Serial.printf("Written data len: %d\n", len);
   Serial.printf("Written data: %d\n", data[0]);
 #endif
-  if (chr->uuid == pwrCtlChar.uuid) {
+  if (chr->uuid == pwrCtlChr.uuid) {
     if (len == 1 && data[0] == 0x0C) {
       uint8_t resp[5] = {0x20, 0x0C, 0x00};
       bool resultValid = false;
@@ -139,14 +116,14 @@ void bleCccdCb(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t value) {
   // Display the raw request packet
     Serial.printf("CCCD Updated: %d\n", value);
 
-  if (chr->uuid == pwrMeasChar.uuid) {
+  if (chr->uuid == pwrMeasChr.uuid) {
     if (chr->notifyEnabled()) {
       Serial.println("Pwr Measurement 'Notify' enabled");
     } else {
       Serial.println("Pwr Measurement 'Notify' disabled");
     }
   }
-  if (chr->uuid == pwrCtlChar.uuid) {
+  if (chr->uuid == pwrMeasChr.uuid) {
     if (chr->indicateEnabled()) {
       Serial.println("Pwr Control 'Indicate' enabled");
     } else {
@@ -158,47 +135,6 @@ void bleCccdCb(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t value) {
 
 void bleSetOffsetCompensationCb(bleOffsetCompCb_t* bleOffsetCompCb) {
   offsetCompCallback = bleOffsetCompCb;
-}
-
-void bleSetupPwrSvc(void) {
-  pwrService.begin();
-
-  uint16_t measLen = 8;
-#ifdef NOTIFY_PEDAL_POWER_BALANCE
-  measLen++;
-#endif
-  pwrMeasChar.setFixedLen(measLen);
-  pwrMeasChar.setProperties(CHR_PROPS_NOTIFY);
-  pwrMeasChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  pwrMeasChar.setCccdWriteCallback(bleCccdCb);
-  pwrMeasChar.begin();
-  
-  uint32_t pwrFeatures = 0;
-  pwrFeatChar.setProperties(CHR_PROPS_READ);
-  pwrFeatChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  pwrFeatChar.setFixedLen(4);
-  pwrFeatChar.begin();
-  
-#ifdef NOTIFY_PEDAL_POWER_BALANCE
-  pwrFeatures |=0x0001; // set bit 3 because pedal power balance  will be supported 
-#endif
-  pwrFeatures |=0x0008; // set bit 3 because crank revolutions will be present
-  pwrFeatures |=0x0200; // set bit 9 because offset calibration will be supported
-  
-  //pwrFeatures |=0x0800; // set bit 11 because multiple sensor locations will be supported
-  pwrFeatChar.write32(pwrFeatures);
-
-  pwrLocChar.setProperties(CHR_PROPS_READ);
-  pwrLocChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  pwrLocChar.setFixedLen(1);
-  pwrLocChar.begin();
-  pwrLocChar.write8(5); // setting to "left crank"
-
-  pwrCtlChar.setProperties(CHR_PROPS_INDICATE | CHR_PROPS_WRITE);
-  pwrCtlChar.setPermission(SECMODE_OPEN, SECMODE_OPEN);
-  pwrCtlChar.setWriteCallback(bleWriteCb);
-  pwrCtlChar.setCccdWriteCallback(bleCccdCb);
-  pwrCtlChar.begin();
 }
 
 /*
@@ -225,6 +161,46 @@ void bleSetupCFMSvc() {
 void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, long time) {
   uint16_t instPwr = instPwrL + instPwrR;
   uint16_t timeUpdate = uint16_t(time / 1000.f * 1024.f) % 65536;
+  uint8_t pwrMeasData[20] = { 0, 0, LMOCS(instPwr) };
+  uint8_t oIdx = 4;
+  uint16_t flags = 0;
+  if (pwrFeatures & FTR_P_PWR_BAL) {
+    uint8_t ppb = 100;
+    float pwrDiff = instPwrR - instPwrL;
+    if (pwrDiff != 0) {
+      ppb -= uint8_t(instPwr / pwrDiff);
+    }
+    pwrMeasData[oIdx] = ppb;
+    oIdx++;
+
+    flags |= 0x03;
+  }
+
+  if (pwrFeatures & FTR_CRANK_REV) {
+    pwrMeasData[oIdx] = LSO(crankRevs);
+    oIdx++;
+    pwrMeasData[oIdx] = MSO(crankRevs);
+    oIdx++;
+    pwrMeasData[oIdx] = LSO(timeUpdate);
+    oIdx++;
+    pwrMeasData[oIdx] = MSO(timeUpdate);
+    oIdx++;
+
+    flags |= 0x20;
+  }
+
+  pwrMeasData[0] = LSO(flags);
+  pwrMeasData[1] = MSO(flags);
+
+  for(uint16_t connHndl : availConnHndls) {
+    if(pwrMeasChr.notifyEnabled(connHndl))
+      pwrMeasChr.notify(connHndl, pwrMeasData, oIdx);
+  }
+}
+/*
+void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, long time) {
+  uint16_t instPwr = instPwrL + instPwrR;
+  uint16_t timeUpdate = uint16_t(time / 1000.f * 1024.f) % 65536;
 #ifdef NOTIFY_PEDAL_POWER_BALANCE
   uint8_t ppb = 100;
   float pwrDiff = instPwrR - instPwrL;
@@ -236,11 +212,11 @@ void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, lo
   uint8_t pwrMeasData[8] = { LMOCS(0x20), LMOCS(instPwr), LMOCS(crankRevs), LMOCS(timeUpdate) };
 #endif
   for(uint16_t connHndl : availConnHndls) {
-    if(pwrMeasChar.notifyEnabled(connHndl))
-      pwrMeasChar.notify(connHndl, pwrMeasData, sizeof(pwrMeasData));
+    if(pwrMeasChr.notifyEnabled(connHndl))
+      pwrMeasChr.notify(connHndl, pwrMeasData, sizeof(pwrMeasData));
   }
 }
-
+*/
 void blePublishRevUpdate(revUpdt_t& revUpdate) {
   bleNotifyPwrMeas(revUpdate.powerL, revUpdate.powerR, revUpdate.crankRev, revUpdate.time);
 
@@ -277,9 +253,68 @@ void blePublishLog(const char* fmt, ...) {
 }
 #endif
 
+
+void bleSetupPwrSvc() {
+  pwrSvc.setUuid(UUID16_SVC_CYCLING_POWER);
+  pwrSvc.begin();
+
+  uint16_t measLen = 4;
+  if (pwrFeatures & FTR_P_PWR_BAL) {
+    measLen += 1;
+  }
+  if (pwrFeatures & FTR_CRANK_REV) {
+    measLen +=4;
+  }
+  pwrMeasChr.setUuid(UUID16_CHR_CYCLING_POWER_MEASUREMENT);
+  pwrMeasChr.setFixedLen(measLen);
+  pwrMeasChr.setProperties(CHR_PROPS_NOTIFY);
+  pwrMeasChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  pwrMeasChr.setCccdWriteCallback(bleCccdCb);
+  pwrMeasChr.begin();
+  
+  pwrFeatChr.setUuid(UUID16_CHR_CYCLING_POWER_FEATURE);
+  pwrFeatChr.setProperties(CHR_PROPS_READ);
+  pwrFeatChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  pwrFeatChr.setFixedLen(4);
+  pwrFeatChr.begin();
+  pwrFeatChr.write32(pwrFeatures);
+
+  sensLocChr.setUuid(UUID16_CHR_SENSOR_LOCATION);
+  sensLocChr.setProperties(CHR_PROPS_READ);
+  sensLocChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  sensLocChr.setFixedLen(1);
+  sensLocChr.begin();
+  switch (devOpModeStr[0])
+  {
+  case 'L':
+    sensLocChr.write8(LOC_LEFT_CRANK);
+    break;
+  case 'R':
+    sensLocChr.write8(LOC_RIGHT_CRANK);
+    break;
+  default:
+    sensLocChr.write8(0);
+    break;
+  }
+
+  if(pwrFeatures & FTR_OFS_CALIB) {
+    pwrCtlChr.setUuid(UUID16_CHR_CYCLING_POWER_CONTROL_POINT);
+    pwrCtlChr.setProperties(CHR_PROPS_INDICATE | CHR_PROPS_WRITE);
+    pwrCtlChr.setPermission(SECMODE_OPEN, SECMODE_OPEN);
+    pwrCtlChr.setWriteCallback(bleWriteCb);
+    pwrCtlChr.setCccdWriteCallback(bleCccdCb);
+    pwrCtlChr.begin();
+  }
+}
+
 void bleSetup() {
+  char buf[20];
   Bluefruit.begin(MAX_CONNECTIONS);
-  Bluefruit.setName(DEV_NAME);
+  ble_gap_addr_t gapaddr = Bluefruit.getAddr();
+  uint32_t devNum = *(uint16_t*)&gapaddr.addr[0] + (*(uint16_t*)&gapaddr.addr[2] & 0xfff << 3);
+  sprintf(buf, "%s%s%s%05ld", DEV_NAME, DEV_REV, devOpModeStr, devNum);
+  Bluefruit.setName(buf);
+
   Bluefruit.autoConnLed(false);
   Bluefruit.setTxPower(-4);
   Bluefruit.Periph.setConnectCallback(bleConnectCb);
@@ -287,7 +322,8 @@ void bleSetup() {
 
   // Configure and Start the Device Information Service
   bleDIS.setManufacturer("QuSensorIndustries");
-  bleDIS.setModel("BFP rev1");
+  sprintf(buf, "%s rev%s", DEV_NAME, DEV_REV);
+  bleDIS.setModel(buf);
 
   bleDIS.begin();
   bleBS.begin();
@@ -300,8 +336,22 @@ void bleSetup() {
 #ifdef ENABLE_EXT_SVCS
   bleExtSetupSvcs();
 #endif
-  blePrepareAdvertising();
-  bleStartAdvertising();
+
+  //blePrepareAdvertising();
+  Bluefruit.Advertising.addName();
+  Bluefruit.Advertising.addTxPower();
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.setIntervalMS(BLE_FAST_ADV_INTVL_MS, BLE_SLOW_ADV_INTVL_MS);
+  Bluefruit.Advertising.setFastTimeout(BLE_FAST_ADV_TIMEOUT_S);
+  Bluefruit.Advertising.addUuid(UUID16_SVC_CYCLING_POWER);
+  
+#ifdef ENABLE_EXT_SVCS
+  bleExtAddAdvSvc(&Bluefruit.Advertising);
+#endif
+
+  Bluefruit.Advertising.start();
+  //bleStartAdvertising();
 
 #ifdef DEBUG
   Serial.println("All BLE services are configured. Starting advertising...");

@@ -24,5 +24,6 @@ bool lcMeasureAndAvgWithMinMax(float& avgValueL, float& avgValueR, int& minValue
 void lcStartContValueUpdate(lcUpdateIsrCb_t* ldUpdateCb);
 void lcStopContValueUpdate();
 bool lcGetValue(float& sValueL, float& sValueR);
+void lcGetAvailableLCs(bool& availableL, bool& availableR);
 
 #endif //_LOAD_CELL_H_

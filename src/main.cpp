@@ -8,6 +8,7 @@
 #include "ble_svcs.h"
 #include "gyro_accl.h"
 #include "load_cell.h"
+#include "cfg.h"
 
 //#define DEBUG
 //#define DO_RAW_MEASURE_1S_LOOP
@@ -32,6 +33,8 @@
 //#define APPLY_EXP_DECAY_ON_DPS_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_FORCE_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.9
+
+//#define AVERAGE_POWER_OVER_N_REVOLUTIONS 1
 
 #define PEDALING_DET_SMPLS_THRSHLD  20
 
@@ -61,6 +64,18 @@ enum LOOP_TASK_CMD {
 };
 float zForceCalibDiffL = 0, zForceCalibDiffR = 0;
 
+CfgCalib cfgClb = {
+  .cfgVer = CFG_CLB_VER,
+  .lcForceCalibFctL = LOAD_FORCE_SCALE_FCT_L,
+  .lcForceCalibFctR = LOAD_FORCE_SCALE_FCT_R
+};
+CfgRuntime cfgRt = {
+  .cfgVer = CFG_RT_VER
+};
+
+
+bool lcActiveL = false, lcActiveR = false;
+
 #ifdef COLLECT_REV_STATS
 struct {
   float avgAngVel = 0;
@@ -80,6 +95,26 @@ struct {
 } lastRevMI;
 
 revUpdt_t lastRev;
+
+
+void applyDefaultRuntimeCfg() {
+  #ifdef AVERAGE_POWER_OVER_N_REVOLUTIONS
+  cfgRt.pwrAvgRevs = AVERAGE_POWER_OVER_N_REVOLUTIONS;
+  #else
+  cfgRt.pwrAvgRevs = 1; //TODO: needs usage impl.
+  #endif
+  #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
+  cfgRt.pwrExpDecFctr = APPLY_EXP_DECAY_ON_POWER_FCTR;
+  #else
+  cfgRt.pwrExpDecFctr = 1;
+  #endif
+  //TODO:...
+}
+
+
+
+
+
 
 #ifdef ENABLE_SD_LOGS
 #define IDX_FILE "STARTCTR"
@@ -157,7 +192,6 @@ inline void initRevStatsOnSD() {
   }
 }
 #endif
-
 #ifdef DO_RAW_MEASURE_1S_LOOP
 void storeAvgMeasurementsToSD() {
   float avgValueL, avgValueR;
@@ -210,6 +244,13 @@ inline void disableSD() {
 inline void writeRideLogEntryToSD() {}
 inline void writeRevStatsToSD() {}
 #endif
+
+
+
+
+
+
+
 
 void blinkLED(int count, int stayOnTime = 100, int stayOffTime = 100) {
   while(count) {
@@ -461,8 +502,13 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     float avgPowerR = (sumPowerPosR + sumPowerNegR) / numOfSmpls;
 
     #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
-    applyExpDecay(avgPowerL, lastRev.powerL, APPLY_EXP_DECAY_ON_POWER_FCTR);
-    applyExpDecay(avgPowerR, lastRev.powerR, APPLY_EXP_DECAY_ON_POWER_FCTR);
+    if (cfgRt.pwrExpDecFctr < 1) {
+      applyExpDecay(avgPowerL, lastRev.powerL, cfgRt.pwrExpDecFctr);
+      applyExpDecay(avgPowerR, lastRev.powerR, cfgRt.pwrExpDecFctr);
+    } else {
+      lastRev.powerL = avgPowerL;
+      lastRev.powerR = avgPowerR;
+    }
     #else
     lastRev.powerL = avgPowerL;
     lastRev.powerR = avgPowerR;
@@ -574,6 +620,7 @@ int16_t doOffsetCalibrations(bool& done) {
 }
 
 inline void systemOff() {
+  cfgClose();
   disableSD();
   //sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
   //sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
@@ -587,11 +634,17 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   // blink once to confirm startup
   blinkLED(1);
+
+  applyDefaultRuntimeCfg();
+
+  cfgSetup();
+  cfgRead(cfgClb, cfgRt);
+  cfgClose();
   
   lcSetup();
-  lcSetScaleFactor(LOAD_FORCE_SCALE_FCT_L, LOAD_FORCE_SCALE_FCT_R);
+  lcGetAvailableLCs(lcActiveL, lcActiveR);
+  lcSetScaleFactor(cfgClb.lcForceCalibFctL, cfgClb.lcForceCalibFctR);
 
-  lcSoftPowerUp();
   lcDoOffsetCalib(LOAD_CELL_EXP_SPS_RATE);
   lcSoftPowerDown();
 
@@ -620,6 +673,15 @@ void setup() {
 
   // blink twice to confirm setup complete
   blinkLED(2);
+
+
+  Serial.println(F("Active Configuration:"));
+  Serial.print(F(" LoadCellAvailableL: ")); Serial.println(lcActiveL);
+  Serial.print(F(" LoadCellAvailableR: ")); Serial.println(lcActiveR);
+  Serial.print(F(" ForceCalibFctL: ")); Serial.println(cfgClb.lcForceCalibFctL);
+  Serial.print(F(" ForceCalibFctR: ")); Serial.println(cfgClb.lcForceCalibFctR);
+  Serial.print(F(" PwrAvgRevs:     ")); Serial.println(cfgRt.pwrAvgRevs);
+  Serial.print(F(" PwrExpDecFctr:  ")); Serial.println(cfgRt.pwrExpDecFctr);
 }
 
 void loop() {
@@ -713,6 +775,7 @@ void loop() {
     break;
     case NO_OP_TOUT:
       syncSD();
+      cfgSync(cfgRt);
       lcSoftPowerDown();
       gaEnableCycledSleep();
     break;
