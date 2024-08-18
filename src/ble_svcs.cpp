@@ -42,13 +42,14 @@ BLECharacteristic pwrMeasChr, pwrFeatChr, pwrCtlChr, sensLocChr;
 uint32_t pwrFeatures = FTR_CRANK_REV | FTR_OFS_CALIB /*| FTR_P_PWR_BAL*/;
 
 bleOffsetCompCb_t* offsetCompCallback = nullptr;
+bleCfmReqCb_t* cfmReqCallback = nullptr;
 
 /*
  * Only here for development.
  */
-BLEService     cfmService = BLEService(0xcafe);
-BLECharacteristic cfgChar = BLECharacteristic("35916a45-9726-4ef4-b09d-f3284968f03c");
-BLECharacteristic logChar = BLECharacteristic("5abc3692-fca4-4a69-955d-cd0442de273f");
+BLEService        cfmService = BLEService(0xcafe);
+BLECharacteristic cfgCtrlChr = BLECharacteristic("35916a45-9726-4ef4-b09d-f3284968f03c");
+BLECharacteristic  cfgMonChr = BLECharacteristic("5abc3692-fca4-4a69-955d-cd0442de273f");
 
 
 std::set<uint16_t> availConnHndls;
@@ -60,7 +61,7 @@ void bleConnectCb(uint16_t connHndl)
   char central_name[32] = { 0 };
   connection->getPeerName(central_name, sizeof(central_name));
 
-  Serial.print("Central connected: ");
+  Serial.print(F("Central connected: "));
   Serial.println(central_name);
   
 #ifdef ENABLE_EXT_SVCS
@@ -80,20 +81,18 @@ void bleDisconnectCb(uint16_t connHndl, uint8_t reason)
   (void) reason;
 
   availConnHndls.erase(connHndl);
-  
-  //blePwrSvc.removeConnection(connHndl);
 
 #ifdef ENABLE_EXT_SVCS
   bleExtRemoveConnection(connHndl);
 #endif
 
   Serial.println();
-  Serial.println("Central disconnected.");
+  Serial.println(F("Central disconnected."));
 }
 
 void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16_t len) {
 #ifdef DEBUG
-  Serial.print("Writte to: "); Serial.println(chr->uuid.toString());
+  Serial.print(F("Writte to: ")); Serial.println(chr->uuid.toString());
   Serial.printf("Written data len: %d\n", len);
   Serial.printf("Written data: %d\n", data[0]);
 #endif
@@ -109,6 +108,88 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
       chr->indicate(conn_hdl, resp, sizeof(resp));
     }
   }
+
+  if (chr->uuid == cfgCtrlChr.uuid) {
+    if(!cfmReqCallback) {
+      return;
+    }
+    if (data[0] >= 'A' && data[0] <= 'Z') {
+      switch (data[0])
+      {
+      case 'C':
+        if(data[1] == 'R' || data[1] == 'L') {
+          data[len] = '\0';
+          float force = -1;
+          if(data[2] == 'S') {
+            float fct = atof((char*)&data[3]);
+            cfmReqCallback(data[1] == 'R' ? REQ_CALIB_SET_R : REQ_CALIB_SET_L, nullptr, fct, 0, 0);
+          } else {
+            if (data[2] == 'W') {
+              force = atof((char*)&data[3]);
+              force *= 9.80928f;
+            } else if (data[2] == 'F') {
+              force = atof((char*)&data[3]);
+            }
+            cfmReqCallback(data[1] == 'R' ? REQ_CALIB_AUTO_R : REQ_CALIB_AUTO_L, nullptr, force, 0, 0);
+          }
+        } else if(data[1] == 'A' ) {
+          cfmReqCallback(REQ_CALIB_APPLY, nullptr, 0, 0, 0);
+        } else if(data[1] == 'V' ) {
+          cfmReqCallback(REQ_CALIB_VERIFY, nullptr, 0, 0, 0);
+        } else if(data[1] == 'P' ) {
+          cfmReqCallback(REQ_CALIB_PERSIST, nullptr, 0, 0, 0);
+        } else if(data[1] == 'G' ) {
+          cfmReqCallback(REQ_CALIB_GET, nullptr, 0, 0, 0);
+        }
+        break;
+      case 'O':
+        if(offsetCompCallback && data[1] == 'C') {
+          bool resultValid = false;
+          offsetCompCallback(resultValid);
+        }
+        break;
+      case 'L':
+        if(data[1] == 'M') {
+          data[len] = '\0';
+          cfmReqCallback(REQ_LOG_MODE, nullptr, atof((char*)&data[2]), 0, 0);
+        }
+        break;
+      case 'G':
+      case 'S':
+        {
+          uint8_t* pArg = nullptr;
+          cfmReq_t req = REQ_INVALID;
+          if(data[1] == 'E' && data[2] == 'D') {
+            req = data[0] == 'S' ? REQ_SET_ED : REQ_GET_ED;
+            pArg = &data[3];
+          } else if(data[1] == 'P' && data[2] == 'A' && data[3] == 'R') {
+            req = data[0] == 'S' ? REQ_SET_PAR : REQ_GET_PAR;
+            pArg = &data[4];
+          } else if(data[1] == 'I' && data[2] == 'P' && data[3] == 'M') {
+            req = data[0] == 'S' ? REQ_SET_IPM : REQ_GET_IPM;
+            pArg = &data[4];
+          }
+          if (data[0] == 'S') {
+            data[len] = '\0';
+            float arg = atof((char*)pArg);
+            cfmReqCallback(req, nullptr, arg, 0, 0);
+          } else {
+            cfmReqCallback(req, nullptr, 0, 0, 0);
+          }
+        }
+        break;
+      default:
+        break;
+      }
+    } else {
+      //TODO: finish this...
+      uint8_t resp[20];
+      uint8_t respLen = cfmReqCallback ? cfmReqCallback((cfmReq_t)data[0], resp, *(float*)&data[1], *(float*)&data[5], *(float*)&data[9]): 0;
+      if(respLen > 0) {
+        chr->indicate(conn_hdl, resp, respLen);
+      }
+    }
+  }
 }
 
 void bleCccdCb(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t value) {
@@ -118,16 +199,28 @@ void bleCccdCb(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t value) {
 
   if (chr->uuid == pwrMeasChr.uuid) {
     if (chr->notifyEnabled()) {
-      Serial.println("Pwr Measurement 'Notify' enabled");
+      Serial.println(F("Pwr Measurement 'Notify' enabled"));
     } else {
-      Serial.println("Pwr Measurement 'Notify' disabled");
+      Serial.println(F("Pwr Measurement 'Notify' disabled"));
     }
   }
-  if (chr->uuid == pwrMeasChr.uuid) {
+  if (chr->uuid == pwrCtlChr.uuid) {
     if (chr->indicateEnabled()) {
-      Serial.println("Pwr Control 'Indicate' enabled");
+      Serial.println(F("Pwr Control 'Indicate' enabled"));
     } else {
-      Serial.println("Pwr Control 'Indicate' disabled");
+      Serial.println(F("Pwr Control 'Indicate' disabled"));
+    }
+  }
+  if (chr->uuid == cfgCtrlChr.uuid) {
+    if (chr->indicateEnabled()) {
+      Serial.println(F("Cfg 'Indicate' enabled"));
+    } else {
+      Serial.println(F("Cfg 'Indicate' disabled"));
+    }
+    if (chr->notifyEnabled()) {
+      Serial.println(F("Cfg 'Notify' enabled"));
+    } else {
+      Serial.println(F("Cfg 'Notify' disabled"));
     }
   }
 #endif
@@ -137,25 +230,28 @@ void bleSetOffsetCompensationCb(bleOffsetCompCb_t* bleOffsetCompCb) {
   offsetCompCallback = bleOffsetCompCb;
 }
 
+void bleSetCfgAndMonRequestCb(bleCfmReqCb_t* bleCfmRequestCb) {
+  cfmReqCallback = bleCfmRequestCb;
+}
+
 /*
  * Only here for debug log purposes
  */
 void bleSetupCFMSvc() {
   cfmService.begin();
 #ifdef ENABLE_BLE_LOG
-  logChar.setProperties(CHR_PROPS_NOTIFY);
-  logChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  logChar.setMaxLen(20);
-  logChar.begin();
+  cfgMonChr.setProperties(CHR_PROPS_NOTIFY);
+  cfgMonChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  cfgMonChr.setMaxLen(20);
+  cfgMonChr.begin();
 #endif
   // Has nothing to do with any spec.
-  cfgChar.setProperties(CHR_PROPS_READ | CHR_PROPS_WRITE);
-  // First param is the read permission, second is write.
-  cfgChar.setPermission(SECMODE_OPEN, SECMODE_OPEN);
-  // Payload is quite limited in BLE, so come up with good logging shorthand.
-  cfgChar.setMaxLen(20);
-  cfgChar.setWriteCallback(bleWriteCb);
-  cfgChar.begin();
+  cfgCtrlChr.setProperties(CHR_PROPS_INDICATE | CHR_PROPS_WRITE);
+  cfgCtrlChr.setPermission(SECMODE_OPEN, SECMODE_OPEN);
+  cfgCtrlChr.setMaxLen(20);
+  cfgCtrlChr.setCccdWriteCallback(bleCccdCb);
+  cfgCtrlChr.setWriteCallback(bleWriteCb);
+  cfgCtrlChr.begin();
 }
 
 void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, long time) {
@@ -197,26 +293,7 @@ void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, lo
       pwrMeasChr.notify(connHndl, pwrMeasData, oIdx);
   }
 }
-/*
-void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, long time) {
-  uint16_t instPwr = instPwrL + instPwrR;
-  uint16_t timeUpdate = uint16_t(time / 1000.f * 1024.f) % 65536;
-#ifdef NOTIFY_PEDAL_POWER_BALANCE
-  uint8_t ppb = 100;
-  float pwrDiff = instPwrR - instPwrL;
-  if (pwrDiff != 0) {
-    ppb -= uint8_t(instPwr / pwrDiff);
-  }
-  uint8_t pwrMeasData[9] = { LMOCS(0x23), LMOCS(instPwr), ppb, LMOCS(crankRevs), LMOCS(timeUpdate) };
-#else
-  uint8_t pwrMeasData[8] = { LMOCS(0x20), LMOCS(instPwr), LMOCS(crankRevs), LMOCS(timeUpdate) };
-#endif
-  for(uint16_t connHndl : availConnHndls) {
-    if(pwrMeasChr.notifyEnabled(connHndl))
-      pwrMeasChr.notify(connHndl, pwrMeasData, sizeof(pwrMeasData));
-  }
-}
-*/
+
 void blePublishRevUpdate(revUpdt_t& revUpdate) {
   bleNotifyPwrMeas(revUpdate.powerL, revUpdate.powerR, revUpdate.crankRev, revUpdate.time);
 
@@ -235,24 +312,29 @@ void blePublishBatSOC(uint8_t batSOC) {
 #ifdef ENABLE_BLE_LOG
 void blePublishLog(const char* fmt, ...) {
   static char msg[20];
+  char* lEntry = nullptr;
+  int nChar = 0;
 
-  va_list args;
-  va_start(args, fmt);
-  int nChar = vsnprintf(msg, sizeof(msg), fmt, args);
-  va_end(args);
-
-  if (nChar < 0) {
-    Serial.println("Failed to create log entry.");
-  }
-  
   for(uint16_t connHndl : availConnHndls) {
-    if(logChar.notifyEnabled(connHndl)) {
-      logChar.notify(connHndl, msg, nChar);
+    if(cfgMonChr.notifyEnabled(connHndl)) {
+      if (lEntry == nullptr) {
+        va_list args;
+        va_start(args, fmt);
+        nChar = vsnprintf(msg, sizeof(msg), fmt, args);
+        va_end(args);
+
+        if (nChar < 0) {
+          Serial.println(F("Failed to create log entry."));
+          return;
+        }
+        lEntry = msg;
+      }
+
+      cfgMonChr.notify(connHndl, lEntry, nChar);
     }
   }
 }
 #endif
-
 
 void bleSetupPwrSvc() {
   pwrSvc.setUuid(UUID16_SVC_CYCLING_POWER);
@@ -337,7 +419,6 @@ void bleSetup() {
   bleExtSetupSvcs();
 #endif
 
-  //blePrepareAdvertising();
   Bluefruit.Advertising.addName();
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.restartOnDisconnect(true);
@@ -351,9 +432,8 @@ void bleSetup() {
 #endif
 
   Bluefruit.Advertising.start();
-  //bleStartAdvertising();
 
 #ifdef DEBUG
-  Serial.println("All BLE services are configured. Starting advertising...");
+  Serial.println(F("All BLE services are configured. Starting advertising..."));
 #endif
 }

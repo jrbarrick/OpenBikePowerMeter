@@ -38,7 +38,7 @@
 
 #define PEDALING_DET_SMPLS_THRSHLD  20
 
-#define ENABLE_EXTREME_ANGLE_DETECT
+//#define ENABLE_EXTREME_ANGLE_DETECT
 
 #define ENABLE_DEAD_SPOT_DETECT
 #define CONT_FORCE_DET_SMPL_COUNT 10
@@ -58,23 +58,43 @@ bool idleConnected = false;
 TaskHandle_t loopTaskHandle = NULL;
 SemaphoreHandle_t loopTaskCmdDoneSemaphore = NULL;
 
+enum CALIB_MODE {
+  CALIB_NOT_ACTIVE = 0,
+  CALIB_L = 1,
+  CALIB_R = 2,
+  CALIB_TEST = 3
+};
+
 enum LOOP_TASK_CMD {
+  CMD_INVALID = 0,
   CALIBRATE_OFFSETS = 1,
-  UPDATE_POWER = 2
+  UPDATE_POWER = 2,
+  CALIB_LC_L = 3,
+  CALIB_LC_R = 4,
+  CALIB_APPLY = 6,
+  CALIB_VERIFY = 7,
+  CALIB_PERSIST = 8
 };
 float zForceCalibDiffL = 0, zForceCalibDiffR = 0;
 
 CfgCalib cfgClb = {
   .cfgVer = CFG_CLB_VER,
-  .lcForceCalibFctL = LOAD_FORCE_SCALE_FCT_L,
-  .lcForceCalibFctR = LOAD_FORCE_SCALE_FCT_R
+  .lcForceCalibFctL = 1666,
+  .lcForceCalibFctR = 1666
 };
 CfgRuntime cfgRt = {
   .cfgVer = CFG_RT_VER
 };
 
+enum BLE_LOG_MODES {
+  BLE_LOG_DISABLED = 0,
+  BLE_LOG_POWER_HR
+};
+uint32_t bleLogMode = BLE_LOG_POWER_HR;
 
 bool lcActiveL = false, lcActiveR = false;
+
+float lcClbForce = 9.999f * 9.80928f;
 
 #ifdef COLLECT_REV_STATS
 struct {
@@ -108,6 +128,7 @@ void applyDefaultRuntimeCfg() {
   #else
   cfgRt.pwrExpDecFctr = 1;
   #endif
+  cfgRt.instPwrMeas = false;
   //TODO:...
 }
 
@@ -327,12 +348,13 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   static uint32_t numOfNegPowerValsL = 0;
   static uint32_t numOfNegPowerValsR = 0;
   static uint32_t numOfSmpls = 0;
-
+  
+  #ifdef ENABLE_EXTREME_ANGLE_DETECT
   static uint32_t maxPowerLIdx = 0;
   static uint32_t maxPowerRIdx = 0;
   static uint32_t minPowerRIdx = 0;
   static uint32_t minPowerLIdx = 0;
-
+  #endif
   static float maxPowerL = FLT_MIN;
   static float maxPowerR = FLT_MIN;
   static float minPowerR = FLT_MAX;
@@ -342,9 +364,6 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   static bool tdsPreCondReached = false;
   static bool bdsReached = false;
   static bool tdsReached = false;
-  
-  static uint32_t tdsLIdx = 0;
-  static uint32_t bdsLIdx = 0;
 
   static double sumAngVel = 0.f;
   static double sumPowerPosL = 0.f;
@@ -454,11 +473,9 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   }
   if (!tdsReached && tdsPreCondReached && (prevForceL < 0) && (prevForceL < forceL) && (forceL > 0)) {
     tdsReached = true;
-    tdsLIdx = numOfSmpls;
   }
   if (!bdsReached && bdsPreCondReached && (prevForceL > 0) && (prevForceL > forceL) && (forceL < 0)) {
     bdsReached = true;
-    bdsLIdx = numOfSmpls;
   }
   prevForceL = forceL;
   #endif
@@ -482,7 +499,7 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
       // synchronize revolution if left crank arm is in down stroke and buttom dead-spot is reached
       if (bdsReached) {
         syncPedaling = false;
-        updatePower = true;
+        updatePower = cfgRt.instPwrMeas;
         revAngl = 0;
       }
     } else if (revAngl >= 360) {
@@ -501,18 +518,25 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     float avgPowerL = (sumPowerPosL + sumPowerNegL) / numOfSmpls;
     float avgPowerR = (sumPowerPosR + sumPowerNegR) / numOfSmpls;
 
-    #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
+
+    float pwrL = lastRev.powerL;
+    float pwrR = lastRev.powerR;
     if (cfgRt.pwrExpDecFctr < 1) {
-      applyExpDecay(avgPowerL, lastRev.powerL, cfgRt.pwrExpDecFctr);
-      applyExpDecay(avgPowerR, lastRev.powerR, cfgRt.pwrExpDecFctr);
+      applyExpDecay(avgPowerL, pwrL, cfgRt.pwrExpDecFctr);
+      applyExpDecay(avgPowerR, pwrR, cfgRt.pwrExpDecFctr);
     } else {
-      lastRev.powerL = avgPowerL;
-      lastRev.powerR = avgPowerR;
+      pwrL = avgPowerL;
+      pwrR = avgPowerR;
     }
-    #else
-    lastRev.powerL = avgPowerL;
-    lastRev.powerR = avgPowerR;
-    #endif
+    if (cfgRt.pwrAvgRevs > 1) {
+      lastRev.powerL = (lastRev.powerL * (cfgRt.pwrAvgRevs - 1) + pwrL) / cfgRt.pwrAvgRevs;
+      lastRev.powerR = (lastRev.powerR * (cfgRt.pwrAvgRevs - 1) + pwrR) / cfgRt.pwrAvgRevs;
+    } else 
+    {
+      lastRev.powerL = pwrL;
+      lastRev.powerR = pwrR;
+    }
+
 
     float avgPowerPosL = (numOfPosPowerValsL > 1) ? sumPowerPosL / numOfPosPowerValsL : sumPowerPosL;
     float avgPowerPosR = (numOfPosPowerValsR > 1) ? sumPowerPosR / numOfPosPowerValsR : sumPowerPosR;
@@ -547,8 +571,6 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
     lastRevStats.avgPowerPosR = avgPowerPosR;
     lastRevStats.avgPowerNegL = avgPowerNegL;
     lastRevStats.avgPowerNegR = avgPowerNegR;
-    lastRevStats.avgRawValueL = sumValueL / numOfSmpls;
-    lastRevStats.avgRawValueR = sumValueR / numOfSmpls;
     #endif
     
   } else if((smplTime - lastUpdate) >= MAX_UPDATE_INTRVL) {
@@ -560,6 +582,11 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   } else {
     return;
   }
+
+  #ifdef COLLECT_REV_STATS
+  lastRevStats.avgRawValueL = sumValueL / numOfSmpls;
+  lastRevStats.avgRawValueR = sumValueR / numOfSmpls;
+  #endif
 
   lastRev.time = smplTime;  
   lastRev.crankRev = totalCrankRevs;
@@ -593,6 +620,16 @@ void isrCbLoadUpdate(float& instForceL, float& instForceR, int32_t& valueL, int3
   #endif
 }
 
+void printActiveCfg() {
+  Serial.println(F("Active Configuration:"));
+  Serial.print(F(" LoadCellAvailableL: ")); Serial.println(lcActiveL);
+  Serial.print(F(" LoadCellAvailableR: ")); Serial.println(lcActiveR);
+  Serial.print(F(" ForceCalibFctL: ")); Serial.println(cfgClb.lcForceCalibFctL);
+  Serial.print(F(" ForceCalibFctR: ")); Serial.println(cfgClb.lcForceCalibFctR);
+  Serial.print(F(" PwrAvgRevs:     ")); Serial.println(cfgRt.pwrAvgRevs);
+  Serial.print(F(" PwrExpDecFctr:  ")); Serial.println(cfgRt.pwrExpDecFctr);
+}
+
 bool syncCmdExec(uint32_t cmd, uint32_t waitTime)
 {
   if(xSemaphoreTake(loopTaskCmdDoneSemaphore, ms2tick(waitTime))) {
@@ -619,6 +656,69 @@ int16_t doOffsetCalibrations(bool& done) {
   return diff;// * 1000;
 }
 
+int16_t doProcessCfmRequest(cfmReq_t req, uint8_t* respBuf, float arg1, float arg2, float arg3) {
+  uint32_t cmd = CMD_INVALID;
+  switch (req)
+  {
+  case REQ_CALIB_AUTO_L:
+    lcClbForce = arg1;
+    cmd = CALIB_LC_L;
+    break;
+  case REQ_CALIB_AUTO_R:
+    lcClbForce = arg1;
+    cmd = CALIB_LC_R;
+    break;
+  case REQ_CALIB_SET_L:
+    cfgClb.lcForceCalibFctL = arg1;
+    cmd = CALIB_PERSIST;
+    break;
+  case REQ_CALIB_SET_R:
+    cfgClb.lcForceCalibFctR = arg1;
+    cmd = CALIB_PERSIST;
+    break;
+  case REQ_CALIB_GET:
+    blePublishLog("L%.0f R%.0f", cfgClb.lcForceCalibFctL, cfgClb.lcForceCalibFctR);
+    return 0;
+  case REQ_CALIB_APPLY:
+    cmd = CALIB_APPLY;
+    break;
+  case REQ_CALIB_VERIFY:
+    cmd = CALIB_VERIFY;
+    break;
+  case REQ_CALIB_PERSIST:
+    cmd = CALIB_PERSIST;
+    break;
+  case REQ_SET_ED:
+    cfgRt.pwrExpDecFctr = arg1 > 1? arg1 / 100 : arg1;
+    printActiveCfg();
+    return 0;
+  case REQ_SET_PAR:
+    cfgRt.pwrAvgRevs = arg1;
+    printActiveCfg();
+    return 0;
+  case REQ_SET_IPM:
+    cfgRt.instPwrMeas = arg1;
+    printActiveCfg();
+    return 0;
+  case REQ_GET_ED:
+    blePublishLog("ED: %.2f", cfgRt.pwrExpDecFctr);
+    return 0;
+  case REQ_GET_PAR:
+    blePublishLog("PAR: %d", cfgRt.pwrAvgRevs);
+    return 0;
+  case REQ_GET_IPM:
+    blePublishLog("IPM: %d", cfgRt.instPwrMeas);
+    return 0;
+  case REQ_LOG_MODE:
+    bleLogMode = arg1;
+    return 0;
+  default:
+    return 0;
+  }
+  syncCmdExec(cmd, 3000);
+  return 0;
+}
+
 inline void systemOff() {
   cfgClose();
   disableSD();
@@ -631,6 +731,9 @@ inline void systemOff() {
 }
 
 void setup() {
+  Wire.begin();
+  Serial.begin(115200);
+
   pinMode(LED_PIN, OUTPUT);
   // blink once to confirm startup
   blinkLED(1);
@@ -647,9 +750,6 @@ void setup() {
 
   lcDoOffsetCalib(LOAD_CELL_EXP_SPS_RATE);
   lcSoftPowerDown();
-
-  Wire.begin();
-  Serial.begin(115200);
 
   gaSetup();
   bleSetup();
@@ -670,23 +770,19 @@ void setup() {
   #endif
 
   bleSetOffsetCompensationCb(doOffsetCalibrations);
+  bleSetCfgAndMonRequestCb(doProcessCfmRequest);
 
   // blink twice to confirm setup complete
   blinkLED(2);
-
-
-  Serial.println(F("Active Configuration:"));
-  Serial.print(F(" LoadCellAvailableL: ")); Serial.println(lcActiveL);
-  Serial.print(F(" LoadCellAvailableR: ")); Serial.println(lcActiveR);
-  Serial.print(F(" ForceCalibFctL: ")); Serial.println(cfgClb.lcForceCalibFctL);
-  Serial.print(F(" ForceCalibFctR: ")); Serial.println(cfgClb.lcForceCalibFctR);
-  Serial.print(F(" PwrAvgRevs:     ")); Serial.println(cfgRt.pwrAvgRevs);
-  Serial.print(F(" PwrExpDecFctr:  ")); Serial.println(cfgRt.pwrExpDecFctr);
+  printActiveCfg();
 }
 
 void loop() {
   static uint32_t idleCtr = 0;
   TickType_t loopWakeTime = xTaskGetTickCount();
+
+  static int clbMode = CALIB_NOT_ACTIVE;
+  static float clbMaxRawAvg = 0;
 
   #ifdef DO_RAW_MEASURE_1S_LOOP
   storeAvgMeasurementsToSD();
@@ -725,9 +821,38 @@ void loop() {
         zForceCalibDiffR -= zForcePreCalibR;
         gaGyroZeroCalibration();
         lcStartContValueUpdate(isrCbLoadUpdate);
+        blePublishLog("OCR: L%.1f R%.1f", zForceCalibDiffL, zForceCalibDiffR);
         break;
       case LOOP_TASK_CMD::UPDATE_POWER:
         blePublishRevUpdate(lastRev);
+      break;
+      case LOOP_TASK_CMD::CALIB_LC_L:
+      clbMode = CALIB_MODE::CALIB_L;
+      clbMaxRawAvg = 0;
+      break;
+      case LOOP_TASK_CMD::CALIB_LC_R:
+      clbMode = CALIB_MODE::CALIB_R;
+      clbMaxRawAvg = 0;
+      break;
+      case LOOP_TASK_CMD::CALIB_APPLY:
+      {
+        if(clbMode == CALIB_MODE::CALIB_L) {
+          cfgClb.lcForceCalibFctL = clbMaxRawAvg / lcClbForce;
+        } else if (clbMode == CALIB_MODE::CALIB_R) {
+          cfgClb.lcForceCalibFctR = clbMaxRawAvg / lcClbForce;
+        }
+        lcSetScaleFactor(cfgClb.lcForceCalibFctL, cfgClb.lcForceCalibFctR);
+        printActiveCfg();
+        clbMode = CALIB_MODE::CALIB_TEST;
+      }
+      break;
+      case LOOP_TASK_CMD::CALIB_VERIFY:
+      clbMode = CALIB_MODE::CALIB_TEST;
+      break;
+      case LOOP_TASK_CMD::CALIB_PERSIST:
+      cfgSync(cfgClb);
+      printActiveCfg();
+      clbMode = CALIB_MODE::CALIB_NOT_ACTIVE;
       break;
       default:
         break;
@@ -737,32 +862,34 @@ void loop() {
 
     doInfrequentUpdateOperations();
 
-    #ifdef COLLECT_REV_STATS
-    #ifdef ENABLE_BLE_LOG
-    float scaleFctL, scaleFctR;
-    lcGetScaleFactor(scaleFctL, scaleFctR);
-    float avgForceL = lastRevStats.avgRawValueL * scaleFctL;
-    float avgForceR = lastRevStats.avgRawValueR * scaleFctR;
-    float avgForceLS = avgForceL > avgForceR ? avgForceL : avgForceR;
-
-    //blePublishLog("P%.0f F%.1f C%.0f", lastRev.powerL + lastRev.powerR, avgForceLS, lastRevMI.avgAngVel / 6);
-    blePublishLog("PL%.1f PR%.1f C%.0f", lastRev.powerL, lastRev.powerR, lastRevMI.avgAngVel / 6);
-    #ifdef MANUAL_CALIB
-    float avgRawValueLS = lastRevStats.avgRawValueL > lastRevStats.avgRawValueR ? lastRevStats.avgRawValueL : lastRevStats.avgRawValueR;
-    static float rlMax = 0;
-    if (!idleConnected) {
-      rlMax = 0;
-    } else {
-      blePublishLog("F%.2f RL%.3f", avgForceLS, avgRawValueLS);
-      if (avgRawValueLS > rlMax) {
-        rlMax = avgRawValueLS;
+    if(clbMode == CALIB_MODE::CALIB_NOT_ACTIVE) {
+      switch (bleLogMode)
+      {
+        case BLE_LOG_DISABLED:
+        /* nothing to do */
+        break;
+      case BLE_LOG_POWER_HR:
+        blePublishLog("L%.0f R%.0f C%.0f S%d", lastRev.powerL, lastRev.powerR, lastRevMI.avgAngVel / 6, lastRevMI.numOfSmpls);
+        break;
+      default:
+        break;
       }
-      delay(1000);
-      blePublishLog("RLmax%.3f", rlMax);
+    } else if (clbMode == CALIB_MODE::CALIB_TEST) {
+      blePublishLog("CT: L%.1f R%.1f", lastRevStats.avgRawValueL / cfgClb.lcForceCalibFctL, lastRevStats.avgRawValueR / cfgClb.lcForceCalibFctR);
+    } else {
+      char mC = 'L';
+      float avgRawValue = 0;
+      if(clbMode == CALIB_MODE::CALIB_L) {
+        avgRawValue = lastRevStats.avgRawValueL;
+      } else if (clbMode == CALIB_MODE::CALIB_R) {
+        avgRawValue = lastRevStats.avgRawValueR;
+        mC = 'R';
+      }
+      if (avgRawValue > clbMaxRawAvg) {
+        clbMaxRawAvg = avgRawValue;
+      }
+      blePublishLog("C%c: %.3f", mC, clbMaxRawAvg);
     }
-    #endif
-    #endif
-    #endif
 
     #ifdef ENABLE_SD_LOGS
     writeRideLogEntryToSD();

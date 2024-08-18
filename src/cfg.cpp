@@ -8,7 +8,10 @@ char CfgClbPath[] = "/cfg/CLB.bin";
 char CfgRtPath[] = "/cfg/RT.bin";
 
 void cfgSetup() {
-  Ifs.begin();
+  if(!Ifs.begin()) {
+    Serial.println("Ifs failed.");
+    return;
+  }
   if(!Ifs.exists(CfgDir)) {
     Ifs.mkdir(CfgDir);
   }
@@ -20,6 +23,7 @@ void cfgClose() {
 
 void cfgWrite(CfgRuntime& cfgRuntime) {
   Ifs.begin();
+  Ifs.remove(CfgRtPath);
   Adafruit_LittleFS_Namespace::File cfgRtFile = Ifs.open(CfgRtPath, Adafruit_LittleFS_Namespace::FILE_O_WRITE);
   if (cfgRtFile.isOpen()) {
     cfgRtFile.write((uint8_t*)&cfgRuntime, sizeof(cfgRuntime));
@@ -29,6 +33,7 @@ void cfgWrite(CfgRuntime& cfgRuntime) {
 
 void cfgWrite(CfgCalib& cfgCalib) {
   Ifs.begin();
+  Ifs.remove(CfgClbPath);
   Adafruit_LittleFS_Namespace::File cfgClbFile = Ifs.open(CfgClbPath, Adafruit_LittleFS_Namespace::FILE_O_WRITE);
   if (cfgClbFile.isOpen()) {
     cfgClbFile.write((uint8_t*)&cfgCalib, sizeof(cfgCalib));
@@ -68,6 +73,17 @@ void cfgSync(CfgRuntime& cfgRuntime) {
     cfgRead(cfgRtOld);
     if(memcmp(&cfgRuntime, &cfgRtOld, sizeof(CfgRuntime))) {
       cfgWrite(cfgRuntime);
-      Serial.println("Cfg synced.");
+      Serial.println("Cfg rt synced.");
     }
+    cfgClose();
+}
+
+void cfgSync(CfgCalib& cfgCalib) {
+    CfgCalib cfgClbOld;
+    cfgRead(cfgClbOld);
+    if(memcmp(&cfgCalib, &cfgClbOld, sizeof(CfgCalib))) {
+      cfgWrite(cfgCalib);
+      Serial.println("Cfg clb synced.");
+    }
+    cfgClose();
 }
