@@ -10,17 +10,20 @@
 #include "load_cell.h"
 #include "cfg.h"
 
+
 //#define DEBUG
 //#define DO_RAW_MEASURE_1S_LOOP
 //#define COLLECT_REV_DATA
 #define ENABLE_SD_LOGS
 #define COLLECT_REV_STATS
 
+//#define ENABLE_EXTREME_ANGLE_DETECT
+
 #define FAKE_BAT_SOC 70
 
 // define pins
-#define VBATPIN A7
-#define LED_PIN A6
+#define VBAT_PIN PIN_VBAT
+#define LED_PIN  PIN_LED2
 #define SD_CS_PIN SS
 
 // define constants
@@ -30,26 +33,24 @@
 #define MAX_UPDATE_INTRVL 2500
 #define MIN_UPDATE_CADENCE 5
 
+#define DEFAULT_CRANK_RADIUS 170
+#define DEFAULT_EXP_DECAY_ON_POWER_FCTR 0.9
+#define DEFAULT_AVG_POWER_OVER_N_REVS 3
+
 //#define APPLY_EXP_DECAY_ON_DPS_FCTR 0.9
 //#define APPLY_EXP_DECAY_ON_FORCE_FCTR 0.9
-//#define APPLY_EXP_DECAY_ON_POWER_FCTR 0.9
-
-//#define AVERAGE_POWER_OVER_N_REVOLUTIONS 1
-
-#define PEDALING_DET_SMPLS_THRSHLD  20
-
-//#define ENABLE_EXTREME_ANGLE_DETECT
 
 #define ENABLE_DEAD_SPOT_DETECT
 #define CONT_FORCE_DET_SMPL_COUNT 10
 #define BUTTOM_DEAD_SPOT_MIN_FORCE_THRSHLD 3
 #define TOP_DEAD_SPOT_MIN_FORCE_THRSHLD -1
-
+#define PEDALING_DET_SMPLS_THRSHLD  20
 
 #define USE_ANGL_INCR_REV_DETECT_WITH_FORCE_TRSHLD_BDS_INIT_SYNC
 
 const float DPS_MIN = MIN_UPDATE_CADENCE * 6; //1000.f * (360.f / MAX_UPDATE_INTRVL);
-const float DPS_CRANK_CIRC_VEL_MULTI =  PI * CRANK_RADIUS / 180;
+
+float DPS_CRANK_CIRC_VEL_MULTI =  PI * DEFAULT_CRANK_RADIUS / 1000.f / 180.f;
 
 uint16_t totalCrankRevs = 0;
 
@@ -118,13 +119,18 @@ revUpdt_t lastRev;
 
 
 void applyDefaultRuntimeCfg() {
-  #ifdef AVERAGE_POWER_OVER_N_REVOLUTIONS
-  cfgRt.pwrAvgRevs = AVERAGE_POWER_OVER_N_REVOLUTIONS;
+  #ifdef DEFAULT_CRANK_RADIUS
+  cfgRt.crankRadius = DEFAULT_CRANK_RADIUS;
   #else
-  cfgRt.pwrAvgRevs = 1; //TODO: needs usage impl.
+  cfgRt.pwrAvgRevs = 1;
   #endif
-  #ifdef APPLY_EXP_DECAY_ON_POWER_FCTR
-  cfgRt.pwrExpDecFctr = APPLY_EXP_DECAY_ON_POWER_FCTR;
+  #ifdef DEFAULT_AVG_POWER_OVER_N_REVS
+  cfgRt.pwrAvgRevs = DEFAULT_AVG_POWER_OVER_N_REVS;
+  #else
+  cfgRt.pwrAvgRevs = 1;
+  #endif
+  #ifdef DEFAULT_EXP_DECAY_ON_POWER_FCTR
+  cfgRt.pwrExpDecFctr = DEFAULT_EXP_DECAY_ON_POWER_FCTR;
   #else
   cfgRt.pwrExpDecFctr = 1;
   #endif
@@ -289,7 +295,7 @@ inline uint8_t getBatterySOC() {
     return FAKE_BAT_SOC;
   #endif
 
-    float batV = analogRead(VBATPIN);
+    float batV = analogRead(VBAT_PIN);
     batV = batV * 2 * 3.3 / 1024;
 
     if (batV > 4.1) {
@@ -688,6 +694,11 @@ int16_t doProcessCfmRequest(cfmReq_t req, uint8_t* respBuf, float arg1, float ar
   case REQ_CALIB_PERSIST:
     cmd = CALIB_PERSIST;
     break;
+  case REQ_SET_CR:
+    cfgRt.crankRadius = arg1 < 1? arg1 * 1000 : arg1;
+    DPS_CRANK_CIRC_VEL_MULTI =  PI * cfgRt.crankRadius / 1000.f / 180.f;
+    printActiveCfg();
+    return 0;
   case REQ_SET_ED:
     cfgRt.pwrExpDecFctr = arg1 > 1? arg1 / 100 : arg1;
     printActiveCfg();
@@ -699,6 +710,9 @@ int16_t doProcessCfmRequest(cfmReq_t req, uint8_t* respBuf, float arg1, float ar
   case REQ_SET_IPM:
     cfgRt.instPwrMeas = arg1;
     printActiveCfg();
+    return 0;
+  case REQ_GET_CR:
+    blePublishLog("CR: %d", cfgRt.crankRadius);
     return 0;
   case REQ_GET_ED:
     blePublishLog("ED: %.2f", cfgRt.pwrExpDecFctr);
@@ -743,6 +757,8 @@ void setup() {
   cfgSetup();
   cfgRead(cfgClb, cfgRt);
   cfgClose();
+
+  DPS_CRANK_CIRC_VEL_MULTI =  PI * cfgRt.crankRadius / 1000.f / 180.f;
   
   lcSetup();
   lcGetAvailableLCs(lcActiveL, lcActiveR);
@@ -752,7 +768,7 @@ void setup() {
   lcSoftPowerDown();
 
   gaSetup();
-  bleSetup();
+  bleSetup(lcActiveL, lcActiveR);
 
   if(!initSD()) {
     disableSD();

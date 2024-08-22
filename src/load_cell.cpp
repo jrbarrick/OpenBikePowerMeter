@@ -8,10 +8,15 @@
 
 //#define DEBUG
 
-
-#define PIN_LOAD_SCK  PIN_017
-#define PIN_LOAD_D0_L PIN_020
-#define PIN_LOAD_D0_R PIN_015
+#ifdef _VARIANT_FEATHER52840_SENSE_
+#define PIN_LOAD_SCK  5
+#define PIN_LOAD_D0_L 6
+#define PIN_LOAD_D0_R 9
+#else
+#define PIN_LOAD_SCK  29
+#define PIN_LOAD_D0_L 28
+#define PIN_LOAD_D0_R 24
+#endif
 
 //#define ENABLE_RIGHT_LOAD_CELL
 

@@ -37,6 +37,8 @@ typedef enum {
   REQ_CALIB_APPLY,
   REQ_CALIB_VERIFY,
   REQ_CALIB_PERSIST,
+  REQ_SET_CR,
+  REQ_GET_CR,
   REQ_SET_ED,
   REQ_GET_ED,
   REQ_SET_PAR,
@@ -49,7 +51,7 @@ typedef enum {
 typedef int16_t (bleOffsetCompCb_t)(bool& resultValid);
 typedef int16_t (bleCfmReqCb_t)(cfmReq_t req, uint8_t* respBuf, float arg1, float arg2, float arg3);
 
-void bleSetup();
+void bleSetup(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable);
 
 void blePublishRevUpdate(revUpdt_t& revUpdate);
 

@@ -64,8 +64,17 @@ void cfgRead(CfgRuntime& cfgRuntime) {
 }
 
 void cfgRead(CfgCalib& cfgCalib, CfgRuntime& cfgRuntime) {
-  cfgRead(cfgCalib);
-  cfgRead(cfgRuntime);
+  CfgCalib cfgCalibRd;
+  CfgRuntime cfgRuntimeRd;
+
+  cfgRead(cfgCalibRd);
+  if (cfgCalibRd.cfgVer == cfgCalib.cfgVer) {
+    cfgCalib = cfgCalibRd;
+  }
+  cfgRead(cfgRuntimeRd);
+  if (cfgRuntimeRd.cfgVer == cfgRuntime.cfgVer) {
+    cfgRuntime = cfgRuntimeRd;
+  }
 }
 
 void cfgSync(CfgRuntime& cfgRuntime) {

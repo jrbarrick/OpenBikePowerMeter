@@ -13,6 +13,7 @@ typedef struct {
 
 typedef struct {
   uint32_t cfgVer;
+  uint32_t crankRadius;
   uint32_t pwrAvgRevs;
   float pwrExpDecFctr;
   bool instPwrMeas;

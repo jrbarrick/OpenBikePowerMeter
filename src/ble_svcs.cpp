@@ -2,7 +2,7 @@
 #include <bluefruit.h>
 #include "ble_svcs.h"
 
-#define ENABLE_EXT_SVCS
+#include "ble_ext_svcs_config.h"
 
 #ifdef ENABLE_EXT_SVCS
 #include "ble_ext_svcs.h"
@@ -19,12 +19,13 @@
 #endif
 
 #ifndef DEV_OP_MODE
-#define DEV_OP_MODE  "-" 
-//#define DEV_OP_MODE  "L-"
-//#define DEV_OP_MODE  "R-"
-#endif
-
+char devOpModeStrLR[4] = "-";
+char devOpModeStrL[4] = "L-";
+char devOpModeStrR[4] = "R-";
+char* devOpModeStr = nullptr;
+#else
 char devOpModeStr[4] = DEV_OP_MODE;
+#endif
 
 #define BLE_ADV_TIMEOUT_S 0
 #define BLE_FAST_ADV_TIMEOUT_S 300
@@ -90,6 +91,13 @@ void bleDisconnectCb(uint16_t connHndl, uint8_t reason)
   Serial.println(F("Central disconnected."));
 }
 
+void respondWithWrongInput() {
+  if (cfmReqCallback) {
+    cfmReqCallback(REQ_LOG_MODE, nullptr, 0, 0, 0);
+  }
+  blePublishLog("Wrong input");
+}
+
 void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16_t len) {
 #ifdef DEBUG
   Serial.print(F("Writte to: ")); Serial.println(chr->uuid.toString());
@@ -119,6 +127,10 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
       case 'C':
         if(data[1] == 'R' || data[1] == 'L') {
           data[len] = '\0';
+          if (data[len - 1] < '0' || data[len - 1] > '9') {
+            respondWithWrongInput();
+            break;
+          }
           float force = -1;
           if(data[2] == 'S') {
             float fct = atof((char*)&data[3]);
@@ -129,6 +141,9 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
               force *= 9.80928f;
             } else if (data[2] == 'F') {
               force = atof((char*)&data[3]);
+            } else {
+              respondWithWrongInput();
+              break;
             }
             cfmReqCallback(data[1] == 'R' ? REQ_CALIB_AUTO_R : REQ_CALIB_AUTO_L, nullptr, force, 0, 0);
           }
@@ -140,12 +155,18 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
           cfmReqCallback(REQ_CALIB_PERSIST, nullptr, 0, 0, 0);
         } else if(data[1] == 'G' ) {
           cfmReqCallback(REQ_CALIB_GET, nullptr, 0, 0, 0);
+        } else {
+          respondWithWrongInput();
+          break;
         }
         break;
       case 'O':
         if(offsetCompCallback && data[1] == 'C') {
           bool resultValid = false;
           offsetCompCallback(resultValid);
+        } else {
+          respondWithWrongInput();
+          break;
         }
         break;
       case 'L':
@@ -159,7 +180,10 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
         {
           uint8_t* pArg = nullptr;
           cfmReq_t req = REQ_INVALID;
-          if(data[1] == 'E' && data[2] == 'D') {
+          if(data[1] == 'C' && data[2] == 'R') {
+            req = data[0] == 'S' ? REQ_SET_CR : REQ_GET_CR;
+            pArg = &data[3];
+          } else if(data[1] == 'E' && data[2] == 'D') {
             req = data[0] == 'S' ? REQ_SET_ED : REQ_GET_ED;
             pArg = &data[3];
           } else if(data[1] == 'P' && data[2] == 'A' && data[3] == 'R') {
@@ -168,9 +192,16 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
           } else if(data[1] == 'I' && data[2] == 'P' && data[3] == 'M') {
             req = data[0] == 'S' ? REQ_SET_IPM : REQ_GET_IPM;
             pArg = &data[4];
+          } else {
+            respondWithWrongInput();
+            break;
           }
           if (data[0] == 'S') {
             data[len] = '\0';
+            if (data[len - 1] < '0' || data[len - 1] > '9') {
+              respondWithWrongInput();
+              break;
+            }
             float arg = atof((char*)pArg);
             cfmReqCallback(req, nullptr, arg, 0, 0);
           } else {
@@ -179,6 +210,7 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
         }
         break;
       default:
+        respondWithWrongInput();
         break;
       }
     } else {
@@ -216,11 +248,6 @@ void bleCccdCb(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t value) {
       Serial.println(F("Cfg 'Indicate' enabled"));
     } else {
       Serial.println(F("Cfg 'Indicate' disabled"));
-    }
-    if (chr->notifyEnabled()) {
-      Serial.println(F("Cfg 'Notify' enabled"));
-    } else {
-      Serial.println(F("Cfg 'Notify' disabled"));
     }
   }
 #endif
@@ -336,7 +363,7 @@ void blePublishLog(const char* fmt, ...) {
 }
 #endif
 
-void bleSetupPwrSvc() {
+void bleSetupPwrSvc(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable) {
   pwrSvc.setUuid(UUID16_SVC_CYCLING_POWER);
   pwrSvc.begin();
 
@@ -366,17 +393,12 @@ void bleSetupPwrSvc() {
   sensLocChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   sensLocChr.setFixedLen(1);
   sensLocChr.begin();
-  switch (devOpModeStr[0])
-  {
-  case 'L':
-    sensLocChr.write8(LOC_LEFT_CRANK);
-    break;
-  case 'R':
-    sensLocChr.write8(LOC_RIGHT_CRANK);
-    break;
-  default:
+  if (leftCrankPowerAvailable && rightCrankPowerAvailable) {
     sensLocChr.write8(0);
-    break;
+  } else if (leftCrankPowerAvailable) {
+    sensLocChr.write8(LOC_LEFT_CRANK);
+  } else if (rightCrankPowerAvailable) {
+    sensLocChr.write8(LOC_RIGHT_CRANK);
   }
 
   if(pwrFeatures & FTR_OFS_CALIB) {
@@ -389,7 +411,17 @@ void bleSetupPwrSvc() {
   }
 }
 
-void bleSetup() {
+void bleSetup(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable) {
+#ifndef DEV_OP_MODE
+  if (leftCrankPowerAvailable & rightCrankPowerAvailable) {
+    devOpModeStr = devOpModeStrLR;
+  } else if (leftCrankPowerAvailable) {
+    devOpModeStr = devOpModeStrL;
+  } else if (rightCrankPowerAvailable) {
+    devOpModeStr = devOpModeStrR;
+  }
+#endif
+
   char buf[20];
   Bluefruit.begin(MAX_CONNECTIONS);
   ble_gap_addr_t gapaddr = Bluefruit.getAddr();
@@ -410,7 +442,7 @@ void bleSetup() {
   bleDIS.begin();
   bleBS.begin();
 
-  bleSetupPwrSvc();
+  bleSetupPwrSvc(leftCrankPowerAvailable, rightCrankPowerAvailable);
 
   // just for debug
   bleSetupCFMSvc();
