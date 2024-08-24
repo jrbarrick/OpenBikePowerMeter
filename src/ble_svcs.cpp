@@ -45,6 +45,9 @@ uint32_t pwrFeatures = FTR_CRANK_REV | FTR_OFS_CALIB /*| FTR_P_PWR_BAL*/;
 bleOffsetCompCb_t* offsetCompCallback = nullptr;
 bleCfmReqCb_t* cfmReqCallback = nullptr;
 
+bool pwrLeftPresent  = false;
+bool pwrRightPresent = false;
+
 /*
  * Only here for development.
  */
@@ -282,11 +285,21 @@ void bleSetupCFMSvc() {
 }
 
 void bleNotifyPwrMeas(int16_t instPwrL, int16_t instPwrR, uint16_t crankRevs, long time) {
-  uint16_t instPwr = instPwrL + instPwrR;
+  uint16_t instPwr = 0;
+  
+  if (pwrLeftPresent && pwrRightPresent) {
+    instPwr = instPwrL + instPwrR;
+  } else if (pwrLeftPresent) {
+    instPwr = instPwrL * 2;
+  } else if (pwrRightPresent) {
+    instPwr = instPwrR * 2;
+  }
+
   uint16_t timeUpdate = uint16_t(time / 1000.f * 1024.f) % 65536;
   uint8_t pwrMeasData[20] = { 0, 0, LMOCS(instPwr) };
   uint8_t oIdx = 4;
   uint16_t flags = 0;
+
   if (pwrFeatures & FTR_P_PWR_BAL) {
     uint8_t ppb = 100;
     float pwrDiff = instPwrR - instPwrL;
@@ -363,17 +376,22 @@ void blePublishLog(const char* fmt, ...) {
 }
 #endif
 
-void bleSetupPwrSvc(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable) {
-  pwrSvc.setUuid(UUID16_SVC_CYCLING_POWER);
-  pwrSvc.begin();
-
+void bleSetupPwrSvc() {
   uint16_t measLen = 4;
+
+  if (pwrLeftPresent & pwrRightPresent) {
+    pwrFeatures |= FTR_P_PWR_BAL;
+  }
   if (pwrFeatures & FTR_P_PWR_BAL) {
     measLen += 1;
   }
   if (pwrFeatures & FTR_CRANK_REV) {
     measLen +=4;
   }
+
+  pwrSvc.setUuid(UUID16_SVC_CYCLING_POWER);
+  pwrSvc.begin();
+  
   pwrMeasChr.setUuid(UUID16_CHR_CYCLING_POWER_MEASUREMENT);
   pwrMeasChr.setFixedLen(measLen);
   pwrMeasChr.setProperties(CHR_PROPS_NOTIFY);
@@ -393,11 +411,11 @@ void bleSetupPwrSvc(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable)
   sensLocChr.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   sensLocChr.setFixedLen(1);
   sensLocChr.begin();
-  if (leftCrankPowerAvailable && rightCrankPowerAvailable) {
+  if (pwrLeftPresent && pwrRightPresent) {
     sensLocChr.write8(0);
-  } else if (leftCrankPowerAvailable) {
+  } else if (pwrLeftPresent) {
     sensLocChr.write8(LOC_LEFT_CRANK);
-  } else if (rightCrankPowerAvailable) {
+  } else if (pwrRightPresent) {
     sensLocChr.write8(LOC_RIGHT_CRANK);
   }
 
@@ -422,6 +440,9 @@ void bleSetup(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable) {
   }
 #endif
 
+  pwrLeftPresent = leftCrankPowerAvailable;
+  pwrRightPresent = rightCrankPowerAvailable;
+
   char buf[20];
   Bluefruit.begin(MAX_CONNECTIONS);
   ble_gap_addr_t gapaddr = Bluefruit.getAddr();
@@ -442,7 +463,7 @@ void bleSetup(bool leftCrankPowerAvailable, bool rightCrankPowerAvailable) {
   bleDIS.begin();
   bleBS.begin();
 
-  bleSetupPwrSvc(leftCrankPowerAvailable, rightCrankPowerAvailable);
+  bleSetupPwrSvc();
 
   // just for debug
   bleSetupCFMSvc();
