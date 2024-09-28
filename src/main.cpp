@@ -68,13 +68,14 @@ enum CALIB_MODE {
 
 enum LOOP_TASK_CMD {
   CMD_INVALID = 0,
-  CALIBRATE_OFFSETS = 1,
-  UPDATE_POWER = 2,
-  CALIB_LC_L = 3,
-  CALIB_LC_R = 4,
-  CALIB_APPLY = 6,
-  CALIB_VERIFY = 7,
-  CALIB_PERSIST = 8
+  CALIBRATE_OFFSETS,
+  UPDATE_POWER,
+  CALIB_LC_L,
+  CALIB_LC_R,
+  CALIB_APPLY,
+  CALIB_VERIFY,
+  CALIB_PERSIST,
+  CALIB_LEAVE
 };
 float zForceCalibDiffL = 0, zForceCalibDiffR = 0;
 
@@ -663,36 +664,36 @@ int16_t doOffsetCalibrations(bool& done) {
 }
 
 int16_t doProcessCfmRequest(cfmReq_t req, uint8_t* respBuf, float arg1, float arg2, float arg3) {
-  uint32_t cmd = CMD_INVALID;
+  uint32_t cmd = LOOP_TASK_CMD::CMD_INVALID;
   switch (req)
   {
   case REQ_CALIB_AUTO_L:
     lcClbForce = arg1;
-    cmd = CALIB_LC_L;
+    cmd = LOOP_TASK_CMD::CALIB_LC_L;
     break;
   case REQ_CALIB_AUTO_R:
     lcClbForce = arg1;
-    cmd = CALIB_LC_R;
+    cmd = LOOP_TASK_CMD::CALIB_LC_R;
     break;
   case REQ_CALIB_SET_L:
     cfgClb.lcForceCalibFctL = arg1;
-    cmd = CALIB_PERSIST;
+    cmd = LOOP_TASK_CMD::CALIB_VERIFY;
     break;
   case REQ_CALIB_SET_R:
     cfgClb.lcForceCalibFctR = arg1;
-    cmd = CALIB_PERSIST;
+    cmd = LOOP_TASK_CMD::CALIB_VERIFY;
     break;
-  case REQ_CALIB_GET:
-    blePublishLog("L%.0f R%.0f", cfgClb.lcForceCalibFctL, cfgClb.lcForceCalibFctR);
-    return 0;
   case REQ_CALIB_APPLY:
-    cmd = CALIB_APPLY;
+    cmd = LOOP_TASK_CMD::CALIB_APPLY;
     break;
   case REQ_CALIB_VERIFY:
-    cmd = CALIB_VERIFY;
+    cmd = LOOP_TASK_CMD::CALIB_VERIFY;
     break;
   case REQ_CALIB_PERSIST:
-    cmd = CALIB_PERSIST;
+    cmd = LOOP_TASK_CMD::CALIB_PERSIST;
+    break;
+  case REQ_CALIB_LEAVE:
+    cmd = LOOP_TASK_CMD::CALIB_LEAVE;
     break;
   case REQ_SET_CR:
     cfgRt.crankRadius = arg1 < 1? arg1 * 1000 : arg1;
@@ -710,6 +711,9 @@ int16_t doProcessCfmRequest(cfmReq_t req, uint8_t* respBuf, float arg1, float ar
   case REQ_SET_IPM:
     cfgRt.instPwrMeas = arg1;
     printActiveCfg();
+    return 0;
+  case REQ_GET_CLB:
+    blePublishLog("L%.0f R%.0f", cfgClb.lcForceCalibFctL, cfgClb.lcForceCalibFctR);
     return 0;
   case REQ_GET_CR:
     blePublishLog("CR: %d", cfgRt.crankRadius);
@@ -868,6 +872,8 @@ void loop() {
       case LOOP_TASK_CMD::CALIB_PERSIST:
       cfgSync(cfgClb);
       printActiveCfg();
+      /* fall through */
+      case LOOP_TASK_CMD::CALIB_LEAVE:
       clbMode = CALIB_MODE::CALIB_NOT_ACTIVE;
       break;
       default:

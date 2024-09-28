@@ -156,8 +156,8 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
           cfmReqCallback(REQ_CALIB_VERIFY, nullptr, 0, 0, 0);
         } else if(data[1] == 'P' ) {
           cfmReqCallback(REQ_CALIB_PERSIST, nullptr, 0, 0, 0);
-        } else if(data[1] == 'G' ) {
-          cfmReqCallback(REQ_CALIB_GET, nullptr, 0, 0, 0);
+        } else if(data[1] == 'L' ) {
+          cfmReqCallback(REQ_CALIB_LEAVE, nullptr, 0, 0, 0);
         } else {
           respondWithWrongInput();
           break;
@@ -189,6 +189,8 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
           } else if(data[1] == 'E' && data[2] == 'D') {
             req = data[0] == 'S' ? REQ_SET_ED : REQ_GET_ED;
             pArg = &data[3];
+          } else if(data[1] == 'C' && data[2] == 'L' && data[3] == 'B') {
+            req = REQ_GET_CLB;
           } else if(data[1] == 'P' && data[2] == 'A' && data[3] == 'R') {
             req = data[0] == 'S' ? REQ_SET_PAR : REQ_GET_PAR;
             pArg = &data[4];
