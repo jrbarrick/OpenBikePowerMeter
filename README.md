@@ -1,4 +1,4 @@
-# OpenBikePowerMeter
+# Open Bike Power Meter
 
 This project aims to provide an open plattform for crank-based power meters for bicycles.
 It is designed to achieve accurate and stable power measurement with real-time data transmission via Bluetooth Low Energy - Cycling Power Service (BLE - CPS).
@@ -69,7 +69,7 @@ This is best achieved on a trainer using a specific weight by turning the rear w
 
 To apply the calibration, issue the 'CA' command and observe the provided results. If the reflected force is plausible, persist the calibration by issuing the 'CP' command. You can always exit calibration mode by issuing the 'CL' command.
 
-## Project Status And Insperations
+## Project Status and Insperation
 
 The project is still under development and may require additional work to function correctly on specific nRF52840 boards.
 However, it presents already a promising and customizable solution for cyclists who want to build their own power meter.
