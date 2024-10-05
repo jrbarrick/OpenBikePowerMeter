@@ -9,7 +9,7 @@ The implemented features so far include:
 - Power saving in idle mode
 - Calibration and runtime configuration persitance in the internal flash file system
 - Interrupt-based force and angle evaluation throughout an entire crank revolution
-- Dead-spot detection for synchronized power updates4
+- Dead-spot detection for synchronized power updates
 - Support for two load cells to derive individual power readings and to obtain real pedal power balance (right configuration hasn't been tested yet)
 - Support for up to 3 parallel connected BLE devices
 - BLE-controlled zero-offset compensation (according to BLE CPS spec., works with Garmin devices)
@@ -22,7 +22,7 @@ and can be used to implement extreme angle detection feature in the future.
 ## Hardware Requirements
 
 - Nordic nRF52840 based board
-- HX711 load cell amplifier module
+- HX711 load-cell amplifier module
 - MPU-6050 gyro&accelerometer module
 - 4x strain gauge
 - Instant adhesive (preferably Loctite 496)
