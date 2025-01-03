@@ -128,7 +128,7 @@ void bleWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t *data, uint16
       switch (data[0])
       {
       case 'C':
-        if(data[1] == 'R' || data[1] == 'L') {
+        if(len > 2 && (data[1] == 'R' || data[1] == 'L')) {
           data[len] = '\0';
           if (data[len - 1] < '0' || data[len - 1] > '9') {
             respondWithWrongInput();
